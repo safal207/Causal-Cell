@@ -1,5 +1,10 @@
 {
   "allowed_actions": ["inspect_contract", "release_payment", "send_payload"],
+  "allowed_action_scopes": {
+    "inspect_contract": ["contract.read"],
+    "release_payment": ["contract.write"],
+    "send_payload": ["network.egress"]
+  },
   "allowed_agents": ["agent:contract-qa"],
   "allowed_delegation_chains": [["user:alice", "agent:trusted-delegate"]],
   "allowed_destinations": ["https://evidence.example.test"],

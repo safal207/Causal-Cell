@@ -32,7 +32,8 @@ inter-agent messages, model rationale, and proposal metadata are untrusted.
 ## Decision order
 
 The guard fails closed across structure, causal identity, policy version,
-digests, time, separate identities, action/scope, tool provenance, delegation,
+digests, time, separate identities, exact action-to-scope binding, tool
+provenance, delegation,
 resource budgets, network destination, sensitive egress, and approval binding.
 
 A missing required approval produces `HOLD`. A forged, unknown, expired,

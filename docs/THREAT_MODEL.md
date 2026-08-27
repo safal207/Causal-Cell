@@ -24,7 +24,7 @@ nodes, APIs, indexers, databases, and their responses remain outside v0.1.
 |---|---|
 | Model output treated as authority | Proposal and authorization remain separate |
 | Missing intent or causal parent | Fail-closed guard |
-| Scope or unknown-action escalation | Exact allow-lists |
+| Action/scope confusion or unknown-action escalation | Exact action-to-scope bindings plus allow-lists |
 | Confused identity/delegation | Separate identity allow-lists and exact chains |
 | Tool supply-chain change | Origin, version, and schema digest binding |
 | Approval copied to another action | Exact proposal/target/context binding |

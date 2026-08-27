@@ -27,8 +27,8 @@ proposal ≠ authorization ≠ execution ≠ observation ≠ verification
 
 - `ACCEPT` permits the executor adapter to be called.
 - `HOLD` waits for bound approval or revalidation and does not dispatch.
-- `BLOCK` rejects malformed, expired, replayed, out-of-scope, or denied work
-  and does not dispatch.
+- `BLOCK` rejects malformed, expired, replayed, out-of-scope, action/scope-
+  confused, or denied work and does not dispatch.
 - A process-local atomic store consumes both `nonce` and `idempotency_key`
   before the executor callback.
 - Every attempt receives a unique evidence directory; a replay cannot overwrite
@@ -95,9 +95,9 @@ Exact inspected revisions and mapping details are in
 
 ## Measured local baseline
 
-The synthetic matrix covers 15 decision cases plus a runtime replay exercise:
+The synthetic matrix covers 16 decision cases plus a runtime replay exercise:
 
-- 15/15 expected decisions matched;
+- 16/16 expected decisions matched;
 - 100% detection across fixtures expected to be held or blocked;
 - 0 false positives and 0 false negatives in that bounded matrix;
 - 100% bundle completeness for the two runtime attempts;

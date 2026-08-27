@@ -26,6 +26,7 @@ def policy() -> dict[str, object]:
         "allowed_agents": ["agent:contract-qa"],
         "allowed_workloads": ["workload:synthetic-demo"],
         "allowed_actions": ["release_payment"],
+        "allowed_action_scopes": {"release_payment": ["contract.write"]},
         "allowed_scopes": ["contract.write"],
         "network_scopes": [],
         "allowed_destinations": [],

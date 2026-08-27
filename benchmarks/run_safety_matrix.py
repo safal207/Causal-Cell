@@ -87,6 +87,12 @@ def _cases() -> list[tuple[str, dict[str, Any], dict[str, Any], DecisionStatus]]
             DecisionStatus.BLOCK,
         ),
         (
+            "action_scope_confusion",
+            rebound(base_proposal(), action="send_payload", scope="contract.read"),
+            base_policy(),
+            DecisionStatus.BLOCK,
+        ),
+        (
             "unknown_action",
             rebound(base_proposal(), action="unknown_high_impact_action"),
             base_policy(),

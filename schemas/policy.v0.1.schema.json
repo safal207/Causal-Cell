@@ -12,6 +12,7 @@
     "allowed_agents",
     "allowed_workloads",
     "allowed_actions",
+    "allowed_action_scopes",
     "allowed_scopes",
     "network_scopes",
     "allowed_destinations",
@@ -24,41 +25,86 @@
     "approvals"
   ],
   "properties": {
-    "schema_version": {"const": 1},
-    "profile": {"const": "org.causalcell.policy.v0.1"},
-    "policy_version": {"$ref": "#/$defs/identifier"},
-    "allowed_subjects": {"$ref": "#/$defs/identifier_array"},
-    "allowed_agents": {"$ref": "#/$defs/identifier_array"},
-    "allowed_workloads": {"$ref": "#/$defs/identifier_array"},
-    "allowed_actions": {"$ref": "#/$defs/identifier_array"},
-    "allowed_scopes": {"$ref": "#/$defs/identifier_array"},
-    "network_scopes": {"$ref": "#/$defs/identifier_array"},
-    "allowed_destinations": {"$ref": "#/$defs/identifier_array"},
-    "allowed_secret_destinations": {"$ref": "#/$defs/identifier_array"},
+    "schema_version": {
+      "const": 1
+    },
+    "profile": {
+      "const": "org.causalcell.policy.v0.1"
+    },
+    "policy_version": {
+      "$ref": "#/$defs/identifier"
+    },
+    "allowed_subjects": {
+      "$ref": "#/$defs/identifier_array"
+    },
+    "allowed_agents": {
+      "$ref": "#/$defs/identifier_array"
+    },
+    "allowed_workloads": {
+      "$ref": "#/$defs/identifier_array"
+    },
+    "allowed_actions": {
+      "$ref": "#/$defs/identifier_array"
+    },
+    "allowed_scopes": {
+      "$ref": "#/$defs/identifier_array"
+    },
+    "network_scopes": {
+      "$ref": "#/$defs/identifier_array"
+    },
+    "allowed_destinations": {
+      "$ref": "#/$defs/identifier_array"
+    },
+    "allowed_secret_destinations": {
+      "$ref": "#/$defs/identifier_array"
+    },
     "trusted_tools": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["origin", "version", "schema_digest"],
+        "required": [
+          "origin",
+          "version",
+          "schema_digest"
+        ],
         "properties": {
-          "origin": {"$ref": "#/$defs/identifier"},
-          "version": {"$ref": "#/$defs/identifier"},
-          "schema_digest": {"$ref": "#/$defs/digest"}
+          "origin": {
+            "$ref": "#/$defs/identifier"
+          },
+          "version": {
+            "$ref": "#/$defs/identifier"
+          },
+          "schema_digest": {
+            "$ref": "#/$defs/digest"
+          }
         }
       }
     },
     "allowed_delegation_chains": {
       "type": "array",
-      "items": {"$ref": "#/$defs/identifier_array"}
+      "items": {
+        "$ref": "#/$defs/identifier_array"
+      }
     },
     "approval_required_risk_tiers": {
       "type": "array",
-      "items": {"enum": ["low", "medium", "high", "critical"]},
+      "items": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ]
+      },
       "uniqueItems": true
     },
-    "require_approval_for_irreversible": {"type": "boolean"},
-    "max_resource_budget": {"$ref": "#/$defs/resource_budget"},
+    "require_approval_for_irreversible": {
+      "type": "boolean"
+    },
+    "max_resource_budget": {
+      "$ref": "#/$defs/resource_budget"
+    },
     "approvals": {
       "type": "object",
       "additionalProperties": {
@@ -76,16 +122,48 @@
           "expires_at"
         ],
         "properties": {
-          "status": {"enum": ["ACTIVE", "REVOKED"]},
-          "proposal_digest": {"$ref": "#/$defs/digest"},
-          "arguments_digest": {"$ref": "#/$defs/digest"},
-          "target": {"$ref": "#/$defs/identifier"},
-          "target_state_digest": {"$ref": "#/$defs/digest"},
-          "policy_version": {"$ref": "#/$defs/identifier"},
-          "subject": {"$ref": "#/$defs/identifier"},
-          "auth_context_digest": {"$ref": "#/$defs/digest"},
-          "expires_at": {"type": "string", "format": "date-time"}
+          "status": {
+            "enum": [
+              "ACTIVE",
+              "REVOKED"
+            ]
+          },
+          "proposal_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "arguments_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "target": {
+            "$ref": "#/$defs/identifier"
+          },
+          "target_state_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "policy_version": {
+            "$ref": "#/$defs/identifier"
+          },
+          "subject": {
+            "$ref": "#/$defs/identifier"
+          },
+          "auth_context_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
+      }
+    },
+    "allowed_action_scopes": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/identifier_array"
       }
     }
   },
@@ -97,7 +175,9 @@
     },
     "identifier_array": {
       "type": "array",
-      "items": {"$ref": "#/$defs/identifier"},
+      "items": {
+        "$ref": "#/$defs/identifier"
+      },
       "uniqueItems": true
     },
     "digest": {
@@ -107,13 +187,34 @@
     "resource_budget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_steps", "max_seconds", "max_cost", "max_fan_out", "max_retries"],
+      "required": [
+        "max_steps",
+        "max_seconds",
+        "max_cost",
+        "max_fan_out",
+        "max_retries"
+      ],
       "properties": {
-        "max_steps": {"type": "integer", "minimum": 1},
-        "max_seconds": {"type": "integer", "minimum": 1},
-        "max_cost": {"type": "number", "minimum": 0},
-        "max_fan_out": {"type": "integer", "minimum": 0},
-        "max_retries": {"type": "integer", "minimum": 0}
+        "max_steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_fan_out": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   }

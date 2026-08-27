@@ -22,6 +22,11 @@ def base_policy() -> dict[str, Any]:
         "allowed_agents": ["agent:contract-qa"],
         "allowed_workloads": ["workload:local-reference"],
         "allowed_actions": ["inspect_contract", "release_payment", "send_payload"],
+        "allowed_action_scopes": {
+            "inspect_contract": ["contract.read"],
+            "release_payment": ["contract.write"],
+            "send_payload": ["network.egress"],
+        },
         "allowed_scopes": ["contract.read", "contract.write", "network.egress"],
         "network_scopes": ["network.egress"],
         "allowed_destinations": ["https://evidence.example.test"],

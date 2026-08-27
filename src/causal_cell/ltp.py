@@ -10,6 +10,13 @@ from .models import Decision, DecisionStatus
 def export_ltp_continuity_input(
     proposal: Mapping[str, Any], decision: Decision, observation: Mapping[str, Any]
 ) -> dict[str, Any]:
+    if "MALFORMED_PROPOSAL" in decision.reasons:
+        return {
+            "as_of": observation["captured_at"],
+            "requests": [],
+            "outcomes": [],
+            "verifier": {"id": "causal-cell-exporter", "version": "0.1.0"},
+        }
     if decision.status is DecisionStatus.HOLD:
         request_state = "DEFERRED"
         continuation_id: str | None = f"approval:{proposal['proposal_digest']}"

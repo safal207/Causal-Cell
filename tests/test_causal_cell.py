@@ -45,6 +45,16 @@ class GuardTests(unittest.TestCase):
             DecisionStatus.ACCEPT,
         )
 
+    def test_action_scope_pair_is_bound(self) -> None:
+        confused = rebound(
+            base_proposal(),
+            action="send_payload",
+            scope="contract.read",
+        )
+        decision = evaluate_proposal(confused, base_policy(), now=NOW)
+        self.assertEqual(decision.status, DecisionStatus.BLOCK)
+        self.assertIn("ACTION_SCOPE_DENIED", decision.reasons)
+
     def test_missing_causal_fields_block(self) -> None:
         for field, reason in (
             ("intent_id", "MISSING_INTENT"),
@@ -161,6 +171,16 @@ class GuardTests(unittest.TestCase):
             "UNKNOWN_PROPOSAL_FIELD",
             evaluate_proposal(unknown, base_policy(), now=NOW).reasons,
         )
+        boolean_budget = copy.deepcopy(base_proposal()["resource_budget"])
+        boolean_budget["max_steps"] = True
+        self.assertIn(
+            "MALFORMED_PROPOSAL",
+            evaluate_proposal(
+                rebound(base_proposal(), resource_budget=boolean_budget),
+                base_policy(),
+                now=NOW,
+            ).reasons,
+        )
 
     def test_approval_expiry_and_binding(self) -> None:
         proposal, policy = approved_irreversible()
@@ -242,6 +262,24 @@ class RuntimeEvidenceTests(unittest.TestCase):
             self.assertEqual(held.continuity["requests"][0]["state"], "DEFERRED")
             self.assertEqual(held.continuity["outcomes"], [])
             self.assertEqual(calls, 1)
+
+    def test_malformed_proposal_fails_closed_with_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            calls = 0
+
+            def executor(_: dict[str, object]) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return {"unexpected": True}
+
+            run = self._cell(root).execute({}, executor)
+            self.assertEqual(run.decision.status, DecisionStatus.BLOCK)
+            self.assertIn("MALFORMED_PROPOSAL", run.decision.reasons)
+            self.assertFalse(run.observation["executor_invoked"])
+            self.assertEqual(run.continuity["requests"], [])
+            self.assertEqual(run.continuity["outcomes"], [])
+            self.assertTrue(run.verification.valid)
+            self.assertEqual(calls, 0)
 
     def test_nonce_idempotency_and_race(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -337,10 +375,11 @@ class ContractBenchmarkTests(unittest.TestCase):
         self.assertEqual(
             policy["properties"]["profile"]["const"], "org.causalcell.policy.v0.1"
         )
+        self.assertIn("allowed_action_scopes", policy["required"])
         result = run_benchmark()
         metrics = result["metrics"]
-        self.assertEqual(metrics["total_cases"], 15)
-        self.assertEqual(metrics["matched_decisions"], 15)
+        self.assertEqual(metrics["total_cases"], 16)
+        self.assertEqual(metrics["matched_decisions"], 16)
         self.assertEqual(metrics["detection_rate_percent"], 100.0)
         self.assertEqual(metrics["false_positives"], 0)
         self.assertEqual(metrics["false_negatives"], 0)

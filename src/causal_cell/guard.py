@@ -211,10 +211,14 @@ def _structural_reasons(proposal: Mapping[str, Any]) -> list[str]:
         positive_integer_fields = ("max_steps", "max_seconds")
         nonnegative_integer_fields = ("max_fan_out", "max_retries")
         if any(
-            not isinstance(budget.get(field), int) or budget[field] < 1
+            isinstance(budget.get(field), bool)
+            or not isinstance(budget.get(field), int)
+            or budget[field] < 1
             for field in positive_integer_fields
         ) or any(
-            not isinstance(budget.get(field), int) or budget[field] < 0
+            isinstance(budget.get(field), bool)
+            or not isinstance(budget.get(field), int)
+            or budget[field] < 0
             for field in nonnegative_integer_fields
         ):
             reasons.append("MALFORMED_PROPOSAL")
@@ -241,6 +245,7 @@ def _policy_valid(policy: Mapping[str, Any]) -> bool:
         "allowed_agents",
         "allowed_workloads",
         "allowed_actions",
+        "allowed_action_scopes",
         "allowed_scopes",
         "network_scopes",
         "allowed_destinations",
@@ -260,11 +265,29 @@ def _policy_valid(policy: Mapping[str, Any]) -> bool:
         "schema_version",
         "profile",
         "policy_version",
+        "allowed_action_scopes",
         "require_approval_for_irreversible",
         "max_resource_budget",
         "approvals",
     }
     if any(not isinstance(policy.get(field), list) for field in list_fields):
+        return False
+    action_scopes = policy.get("allowed_action_scopes")
+    if not isinstance(action_scopes, Mapping):
+        return False
+    allowed_actions = policy["allowed_actions"]
+    policy_scopes = policy["allowed_scopes"]
+    if any(not _nonempty(action) for action in allowed_actions) or any(
+        not _nonempty(scope) for scope in policy_scopes
+    ):
+        return False
+    allowed_scopes = set(policy_scopes)
+    if set(action_scopes) != set(allowed_actions) or any(
+        not isinstance(scopes, list)
+        or not scopes
+        or any(not _nonempty(scope) or scope not in allowed_scopes for scope in scopes)
+        for scopes in action_scopes.values()
+    ):
         return False
     if not isinstance(policy.get("max_resource_budget"), Mapping):
         return False
@@ -272,10 +295,14 @@ def _policy_valid(policy: Mapping[str, Any]) -> bool:
     if set(budget) != BUDGET_FIELDS:
         return False
     if any(
-        not isinstance(budget.get(field), int) or budget[field] < 1
+        isinstance(budget.get(field), bool)
+        or not isinstance(budget.get(field), int)
+        or budget[field] < 1
         for field in ("max_steps", "max_seconds")
     ) or any(
-        not isinstance(budget.get(field), int) or budget[field] < 0
+        isinstance(budget.get(field), bool)
+        or not isinstance(budget.get(field), int)
+        or budget[field] < 0
         for field in ("max_fan_out", "max_retries")
     ):
         return False
@@ -371,6 +398,13 @@ def evaluate_proposal(
         reasons.append("ACTION_DENIED")
     if proposal["scope"] not in policy["allowed_scopes"]:
         reasons.append("SCOPE_DENIED")
+    if (
+        proposal["action"] in policy["allowed_actions"]
+        and proposal["scope"] in policy["allowed_scopes"]
+        and proposal["scope"]
+        not in policy["allowed_action_scopes"].get(proposal["action"], [])
+    ):
+        reasons.append("ACTION_SCOPE_DENIED")
 
     trusted_tool = any(
         isinstance(tool, Mapping)

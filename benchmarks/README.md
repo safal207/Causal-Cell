@@ -6,7 +6,7 @@ Run:
 python -m benchmarks.run_safety_matrix
 ```
 
-The matrix evaluates 15 deterministic proposal/policy fixtures and performs an
+The matrix evaluates 16 deterministic proposal/policy fixtures and performs an
 original-plus-replay runtime exercise.
 
 Metrics cover exact decision matches, bounded detection rate, false positives,
