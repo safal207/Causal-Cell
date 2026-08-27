@@ -27,8 +27,11 @@ This applies twice:
    existing `CausalCell` evaluates it before the capability executor is invoked.
 
 A model cannot supply or override the subject, agent identity, workload, scope,
-policy version, approval, nonce, idempotency key, delegation chain, tool
-provenance, target-state digest, risk tier, reversibility, or resource budget.
+policy version, nonce, idempotency key, delegation chain, tool provenance,
+target-state digest, risk tier, reversibility, or resource budget. Organism
+v0.1 has no approval resume protocol: it rejects approval-required policies and
+capabilities during trusted setup, and generated proposals bind
+`approval_ref=None`.
 
 ## Can another LLM connect?
 
@@ -43,8 +46,8 @@ class ModelAdapter(Protocol):
 ```
 
 The application registers the adapter under a stable `adapter_id`. The exact
-`AdapterIdentity` digest (provider, model, origin, version, schema digest, and
-destination) must be:
+`AdapterIdentity` digest (adapter ID, provider, model, origin, version, schema
+digest, and destination) must be:
 
 - present in the organism manifest;
 - allowed by the trusted organism policy; and
@@ -52,12 +55,23 @@ destination) must be:
 
 Provider credentials stay inside the adapter implementation. They are not fields
 of `ModelCall`, the organism manifest, or the evidence bundle. Provider request
-IDs and usage are recorded only as observations; they grant no authority.
+IDs and usage are returned only as adapter-reported observations; they grant no
+authority. `OrganismRun` retains the detached result in memory, while the
+per-cell bundle evidence-binds its record digest rather than persisting the raw
+ID/usage fields. Every `ModelResult` must also carry adapter-assigned
+`contains_secret` and `data_classification` labels. The runner can only join
+those labels monotonically with earlier labels; the adapter must classify
+conservatively because the kernel does not inspect response content.
 
-The repository ships only `CallbackModelAdapter`, an offline/reference adapter.
-It performs no network call. A production OpenAI, Anthropic, Gemini, local-model,
-or other connector belongs in the embedding application and must preserve the
-same contract.
+The repository ships only `CallbackModelAdapter`, a reference wrapper with no
+provider SDK or transport of its own. Its application-supplied callback may
+still perform I/O; the bundled example callbacks are fully offline. A production
+OpenAI, Anthropic, Gemini, local-model, or other connector belongs in the
+embedding application and must preserve the same contract. It must disable
+provider-side tools, functions, and automatic agent handoffs, or route every such
+effect back through its own guarded `CausalCell`; otherwise an SDK can bypass the
+`ActionDraft` boundary. Redirects must be disabled or every hop must be checked
+against the same destination and secret-egress policy.
 
 ## Can an LLM create its own organism?
 
@@ -85,16 +99,32 @@ The only supported pipeline is:
 | `analyst` | Convert facts into `ACTION` or `NO_ACTION` | Guard before model adapter |
 | `executor` | Compile and execute one predeclared capability | Guard before executor |
 
-Required global limits are three stages, two model calls, zero retries, and fan-out
-of one. Token, cost, and deadline caps are also bound in the manifest and capped
-by trusted policy. The runner passes the earlier of the context expiry and
-manifest deadline into every guarded proposal, then checks it again after each
-adapter returns and before final dispatch.
+Required global limits are three stages, at most two guarded adapter
+invocations, zero runner retries, and runner fan-out of one. Token, cost, and
+deadline caps are bound in the manifest and capped by trusted policy. Each
+model call also receives its stage-local `max_seconds` deadline. The effective
+run deadline is the earliest of context expiry, global manifest limit, and exact
+activation expiry. These counters do not attest or constrain hidden SDK/provider
+retries or fan-out inside an in-process adapter.
+
+The runner revalidates activation and time before every model dispatch, after
+each valid returned result before downstream dispatch, and before final action
+dispatch. Malformed or terminal results already stop downstream. A callback is
+synchronous and cannot be preempted, but a late result cannot authorize a
+downstream effect.
+
+Before consuming the semantic-run key or calling either model, the runner also
+validates both complete policy documents and their statically known compatibility
+with the fixed manifest, adapter identities, capabilities, executors, tool
+provenance, budgets, and current context egress labels. A corrected retry is
+therefore not poisoned by a deterministic trusted-configuration failure. Taint
+introduced by a model result remains dynamic and is checked again at the normal
+cell boundary.
 
 A manifest digest covers the whole manifest except the digest field itself.
-`StaticActivationRegistry` requires an exact match on organism ID, digest,
-subject, policy version, and expiry. Missing activation is `HOLD`; a mismatch or
-expired activation is `BLOCK`.
+`StaticActivationRegistry` accepts any unexpired exact match on organism ID,
+digest, subject, and policy version, allowing safe activation rotation. Missing
+activation is `HOLD`; an expired exact activation or mismatch is `BLOCK`.
 
 ## Strict ActionDraft
 
@@ -129,26 +159,70 @@ No action:
 }
 ```
 
-Unknown fields fail closed. The trusted capability definition restricts target
-prefixes and allowed/required argument keys. The compiler copies only those data
-fields; it never merges the model dictionary into an action proposal.
+Unknown fields fail closed. Inputs and model outputs are detached into strict
+plain-JSON snapshots before digest or reuse; mutable mapping/list subclasses,
+non-string keys, non-finite numbers, depth over 128, and more than 100,000
+JSON nodes are rejected. Individual strings are capped at 1,000,000 UTF-8 bytes,
+aggregate string/key bytes at 4,000,000, and integers at 4,096 bits. Invalid
+Unicode such as lone surrogates is rejected before hashing or dispatch.
+
+The trusted capability definition restricts target prefixes, allowed/required
+argument keys, a host-owned target validator/canonicalizer contract, and a
+host-owned argument value validator. A target prefix must match exactly or at a
+segment boundary; `tenant-a` cannot authorize `tenant-attacker`. The target
+validator must reject traversal/encoding ambiguity and use the same
+interpretation as the executor.
+
+For a network capability, `destination` is a trusted HTTPS origin, not a path or
+payload field. The factory canonicalizes host case, IPv6 brackets, and default
+port 443, and rejects path/query/fragment destinations. If a model-selected
+target is URL-like, its canonical HTTPS origin must equal that destination and
+the executor receives the canonical target; a different, invalid, or fragmented
+URL is blocked. A non-network scope must use `destination=None`. Opaque targets
+and arguments are resource/data identifiers only:
+the trusted executor must not reinterpret either as a second network endpoint.
+If it derives an endpoint at all, the target/argument validator must bind that
+derivation exactly, including redirects.
+
+Capabilities must be reversible and use only `low` or `medium` risk in v0.1.
+Their definitions are separate trusted runtime configuration: activation binds
+the allowed capability IDs, not the validator code or full capability fields.
+The factory snapshots each capability budget at setup to prevent later mutation.
+Factory policy versions and every manifest capability/executor registration are
+checked before the first model call.
+
+The compiler copies only validated data fields and never merges the model
+dictionary into an action proposal. Host context, capability labels, and
+adapter-assigned `ModelResult` labels are joined monotonically: downstream
+proposals can only retain or increase sensitivity. Adapter claims can raise
+taint but cannot lower it. v0.1 has no independent content classifier, so an
+under-labeling adapter remains a trusted-integration failure.
 
 ## Causal binding
 
-The host generates run, trace, span, request, attempt, nonce, and idempotency IDs.
+The host generates run, trace, span, request, attempt, and nonce IDs. The final
+action idempotency key is instead stable: it is derived from the semantic effect
+(trusted subject and intent, root cause, action/scope, compiled target, canonical
+destination origin, and validated argument digest), not the random attempt ID or
+manifest topology. Executor-equivalent canonicalization beyond the kernel's HTTPS
+rules remains part of the trusted validator/executor contract.
 
 Each downstream call binds to the exact previous model-result ID and digest. The
 final action must bind to the analyst result and to the original trusted subject,
 intent, workload, and executor identity. Any mismatch blocks before dispatch.
 
-A process-local atomic semantic-run key binds:
+A runner's semantic-run store atomically binds:
 
 - organism and manifest digest;
 - subject and intent;
 - root parent cause;
-- root input digest.
+- one detached root-input snapshot and its digest.
 
-A second equivalent run is blocked as `ORGANISM_REPLAYED`.
+A second equivalent run through the same injected store is blocked as
+`ORGANISM_REPLAYED`. A different root or manifest/adapter revision can run the
+models again, but a shared action-cell nonce store still blocks the same
+semantic executor effect. Default stores are created per `OrganismRunner`;
+cross-runner protection requires callers to inject and share stores.
 
 ## Terminal states
 
@@ -156,12 +230,16 @@ A second equivalent run is blocked as `ORGANISM_REPLAYED`.
 |---|---|
 | `COMPLETED` | Both model calls and the final guarded executor returned |
 | `NO_ACTION` | Analyst returned a valid no-action draft |
-| `HOLD` | Required activation or approval is absent |
+| `HOLD` | Exact manifest activation is absent; nothing dispatched |
 | `BLOCK` | Policy, provenance, shape, causality, replay, or budget check failed |
-| `FAILED` | A model adapter refused, errored, or raised |
-| `EFFECT_UNCERTAIN` | Final executor raised; no success claim is made |
+| `FAILED` | A provider returned a terminal result, or runtime failed before an effect boundary started |
+| `EFFECT_UNCERTAIN` | An invoked adapter/executor raised, changed provenance, or evidence persistence failed after invocation began |
 
-No automatic retry occurs in v0.1.
+No automatic retry or approval resume occurs in v0.1. `COMPLETED` means the
+callback returned; it is not independent proof that an external system committed
+the effect. `OrganismRun.action_effect_boundary_started` (and its
+`executor_invoked` compatibility property) remains true when the final
+callback started but post-effect evidence persistence failed.
 
 ## Evidence
 
@@ -181,8 +259,9 @@ Run the fully offline mixed-provider example:
 python examples/multi_model_organism.py
 ```
 
-It uses synthetic “OpenAI” and “Anthropic” identities to prove provider
-interchangeability without credentials or network access.
+It uses synthetic “OpenAI” and “Anthropic” identities to demonstrate
+adapter-contract and provider-identity interchangeability without claiming real
+provider SDK interoperability.
 
 ## Production limitations
 
@@ -190,14 +269,26 @@ Organism v0.1 is a reference kernel, not a production isolation boundary:
 
 - adapters and executors are synchronous, in-process callbacks; an over-deadline
   callback cannot be preempted, though downstream dispatch is blocked;
-- replay and semantic-run stores are process-local;
-- provider identity and usage are adapter-reported, not independently attested;
-- budgets are per run and not distributed reservations;
+- default replay, nonce, and semantic-run stores are in-memory and per runner;
+  cross-runner protection requires explicitly shared stores;
+- provider identity, usage, and result labels are adapter-reported, not
+  independently attested;
+- model output content is not independently classified; callers must label
+  sensitive context before the run and adapters must conservatively label every
+  result;
+- token/cost checks use reported post-call usage, so they cannot prevent already
+  consumed provider cost;
+- adapter/SDK-internal retries, fan-out, and provider request counts are not
+  observable or enforced by the runner;
+- provider-side tools/functions/handoffs must be disabled or separately guarded,
+  and every outbound redirect hop must be reauthorized;
+- budgets are per run and not durable distributed reservations;
 - no real provider SDK, credential store, sandbox, or network transport ships;
-- executor return/error does not independently prove the external side effect;
+- executor callback return/error does not independently prove an external effect;
+- no approval-required organism actions or plan/resume flow;
 - no recursive organisms, dynamic topology, retries, or parallel fan-out;
 - no durable aggregate organism evidence bundle exists yet.
 
 Production deployments need isolated adapters/executors, durable atomic stores,
-credential isolation, outbound network enforcement, distributed budgets,
-independent effect verification, and an activation control plane.
+credential isolation, outbound network and redirect enforcement, distributed
+budgets, independent effect verification, and an activation control plane.

@@ -13,17 +13,28 @@ from causal_cell import (
     CausalCell,
     DecisionStatus,
     InMemoryNonceStore,
+    digest_json,
     evaluate_proposal,
     normalize_proposal,
     verify_bundle,
 )
 from causal_cell.evidence import load_json_strict
-from causal_cell.guard import REQUIRED_FIELDS
-
+from causal_cell.guard import REQUIRED_FIELDS, normalize_https_origin
 from tests.helpers import NOW, approved_irreversible, base_policy, base_proposal, rebound
 
 
 class GuardTests(unittest.TestCase):
+    def test_https_origin_normalization_handles_ipv6_and_empty_hosts(self) -> None:
+        self.assertEqual(
+            "https://[::1]",
+            normalize_https_origin("https://[::1]:443/path"),
+        )
+        self.assertEqual(
+            "https://[::1]:8443",
+            normalize_https_origin("https://[::1]:8443/path"),
+        )
+        self.assertIsNone(normalize_https_origin("https://."))
+
     def test_safe_and_approval_paths(self) -> None:
         self.assertEqual(
             evaluate_proposal(base_proposal(), base_policy(), now=NOW).status,
@@ -55,6 +66,51 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(decision.status, DecisionStatus.BLOCK)
         self.assertIn("ACTION_SCOPE_DENIED", decision.reasons)
 
+    def test_malformed_policy_values_fail_closed(self) -> None:
+        malformed = base_policy()
+        malformed["allowed_scopes"] = [["unhashable"]]
+        decision = evaluate_proposal(base_proposal(), malformed, now=NOW)
+        self.assertEqual(DecisionStatus.BLOCK, decision.status)
+        self.assertEqual(("POLICY_INVALID",), decision.reasons)
+
+        unknown_tool_field = base_policy()
+        unknown_tool_field["trusted_tools"][0]["revoked"] = True
+        decision = evaluate_proposal(
+            base_proposal(),
+            unknown_tool_field,
+            now=NOW,
+        )
+        self.assertEqual(DecisionStatus.BLOCK, decision.status)
+        self.assertEqual(("POLICY_INVALID",), decision.reasons)
+
+        boolean_version = base_policy()
+        boolean_version["schema_version"] = True
+        decision = evaluate_proposal(
+            base_proposal(),
+            boolean_version,
+            now=NOW,
+        )
+        self.assertEqual(DecisionStatus.BLOCK, decision.status)
+        self.assertEqual(("POLICY_INVALID",), decision.reasons)
+
+    def test_boolean_proposal_schema_version_is_malformed(self) -> None:
+        proposal = rebound(base_proposal(), schema_version=True)
+        decision = evaluate_proposal(proposal, base_policy(), now=NOW)
+        self.assertEqual(DecisionStatus.BLOCK, decision.status)
+        self.assertEqual(("MALFORMED_PROPOSAL",), decision.reasons)
+
+    def test_unhashable_proposal_enums_fail_closed(self) -> None:
+        for field in ("reversibility", "risk_tier", "data_classification"):
+            with self.subTest(field=field):
+                proposal = rebound(base_proposal(), **{field: []})
+                decision = evaluate_proposal(proposal, base_policy(), now=NOW)
+                self.assertEqual(DecisionStatus.BLOCK, decision.status)
+                self.assertEqual(("MALFORMED_PROPOSAL",), decision.reasons)
+
+    def test_surrogate_json_string_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "valid UTF-8"):
+            digest_json({"invalid": "\ud800"})
+
     def test_missing_causal_fields_block(self) -> None:
         for field, reason in (
             ("intent_id", "MISSING_INTENT"),
@@ -85,6 +141,30 @@ class GuardTests(unittest.TestCase):
             evaluate_proposal(allowed, base_policy(), now=NOW).status,
             DecisionStatus.ACCEPT,
         )
+        unknown_policy = base_policy()
+        unknown_policy["allowed_secret_destinations"] = []
+        unknown = rebound(
+            base_proposal(),
+            action="send_payload",
+            scope="network.egress",
+            destination="https://evidence.example.test",
+            data_classification="unknown",
+        )
+        self.assertIn(
+            "SECRET_DESTINATION_DENIED",
+            evaluate_proposal(unknown, unknown_policy, now=NOW).reasons,
+        )
+
+    def test_non_network_scope_cannot_carry_a_destination(self) -> None:
+        confused = rebound(
+            base_proposal(),
+            destination="https://unapproved.example.test",
+            contains_secret=True,
+            data_classification="restricted",
+        )
+        decision = evaluate_proposal(confused, base_policy(), now=NOW)
+        self.assertEqual(DecisionStatus.BLOCK, decision.status)
+        self.assertEqual(("DESTINATION_SCOPE_MISMATCH",), decision.reasons)
 
     def test_untrusted_context_identity_delegation_and_tool(self) -> None:
         proposal = rebound(

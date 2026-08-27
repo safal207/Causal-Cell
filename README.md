@@ -49,13 +49,20 @@ flowchart TD
 
 Each model adapter invocation is itself guarded because it can spend money and
 cross a network boundary. The analyst may return only a capability ID, target,
-and data arguments. The trusted host supplies identity, scope, policy, approval,
-tool provenance, causal IDs, replay keys, and budgets.
+and data arguments. The trusted host supplies identity, scope, policy, tool
+provenance, causal IDs, replay keys, budgets, and conservative data-label rules.
+Organism v0.1 sets `approval_ref` to `None` and rejects approval-required
+policies or capabilities because it has no plan/resume protocol.
 
 OpenAI, Anthropic, Gemini, a local model, or another provider can occupy either
 model role through the same `ModelAdapter` contract. Exact adapter identity is
 digest-bound in the manifest and explicitly activated by the host. Recursive
 `create_organism` / `organism.spawn` actions are hard-blocked.
+
+Real adapters must disable SDK-side tools/functions/agent handoffs or route each
+effect through another guarded cell. Network capabilities bind URL-like targets
+to one canonical, host-owned HTTPS destination origin; trusted executors must not
+reinterpret opaque model arguments as alternate endpoints.
 
 See [Organism v0.1](docs/ORGANISM_V0_1.md), its
 [threat model](docs/ORGANISM_THREAT_MODEL.md), and the
@@ -144,7 +151,8 @@ Version `v0.2` does **not** provide:
 - independent truth verification of a model or executor response;
 - blockchain finality, evidence authenticity, or complete history;
 - external exactly-once side effects;
-- dynamic organism topology, retries, parallel fan-out, or recursive spawn; or
+- dynamic organism topology, retries, parallel fan-out, recursive spawn, or
+  approval-required organism actions; or
 - a separately signed aggregate organism evidence bundle.
 
 Production callers must use durable atomic stores and thin adapters to externally

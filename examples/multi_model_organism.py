@@ -1,16 +1,18 @@
 """Offline mixed-provider Organism v0.1 example.
 
-Both adapters are synthetic callbacks. Replace them with provider SDK adapters in your
-application; keep the Causal Cell guards and trusted proposal factory unchanged.
+Both adapters are synthetic callbacks. For real providers, preserve the guarded
+adapter/compiler pattern while replacing the capability validators, budgets,
+provenance, and executor with application-owned production configuration.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Mapping
+from typing import Any
 
 from causal_cell import (
     ACTION_DRAFT_PROFILE,
@@ -29,7 +31,6 @@ from causal_cell import (
     StaticProposalFactory,
     bind_organism_manifest,
 )
-
 
 NOW = datetime(2026, 8, 27, 21, 0, tzinfo=UTC)
 AUTH_DIGEST = "sha256:" + "d" * 64
@@ -163,6 +164,8 @@ def build_runner(evidence_root: Path) -> tuple[OrganismRunner, list[dict[str, An
             input_tokens=4,
             output_tokens=5,
             cost_microunits=100,
+            contains_secret=False,
+            data_classification="public",
         )
 
     def analyse(call: ModelCall) -> ModelResult:
@@ -181,6 +184,8 @@ def build_runner(evidence_root: Path) -> tuple[OrganismRunner, list[dict[str, An
             input_tokens=6,
             output_tokens=7,
             cost_microunits=200,
+            contains_secret=False,
+            data_classification="public",
         )
 
     adapters = AdapterRegistry(
@@ -201,8 +206,16 @@ def build_runner(evidence_root: Path) -> tuple[OrganismRunner, list[dict[str, An
         reversibility="reversible",
         risk_tier="low",
         allowed_target_prefixes=("resource:",),
+        target_validator=lambda target: all(
+            segment not in {".", ".."}
+            for segment in target.split("/")
+        ),
         allowed_argument_keys=frozenset({"result"}),
         required_argument_keys=frozenset({"result"}),
+        argument_validator=lambda arguments: (
+            isinstance(arguments.get("result"), str)
+            and 0 < len(arguments["result"]) <= 256
+        ),
         resource_budget=resource_budget(),
     )
 

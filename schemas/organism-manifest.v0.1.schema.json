@@ -241,11 +241,11 @@
       "properties": {
         "max_steps": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 1
         },
         "max_seconds": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 1
         },
         "max_cost": {
           "type": "number",

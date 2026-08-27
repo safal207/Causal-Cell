@@ -8,9 +8,10 @@ from .adapters import (
     ModelCall,
     ModelResult,
     ModelResultStatus,
+    snapshot_model_result,
     validate_model_result,
 )
-from .canonical import bind_proposal, digest_json, proposal_digest
+from .canonical import bind_proposal, digest_json, proposal_digest, snapshot_json
 from .evidence import EvidenceVerification, verify_bundle
 from .guard import evaluate_proposal
 from .models import CellRun, Decision, DecisionStatus
@@ -75,6 +76,8 @@ __all__ = [
     "normalize_proposal",
     "organism_manifest_digest",
     "proposal_digest",
+    "snapshot_json",
+    "snapshot_model_result",
     "validate_action_draft",
     "validate_model_result",
     "verify_bundle",

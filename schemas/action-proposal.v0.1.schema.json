@@ -100,19 +100,33 @@
     "untrusted_context": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["source", "content"],
-        "properties": {
-          "source": {
-            "enum": ["web", "memory", "tool_output", "inter_agent", "retrieval", "other"]
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["source", "content"],
+            "properties": {
+              "source": {"$ref": "#/$defs/untrusted_source"},
+              "content": {}
+            },
+            "additionalProperties": false
           },
-          "content": {}
-        },
-        "additionalProperties": true
+          {
+            "type": "object",
+            "required": ["source", "content_digest"],
+            "properties": {
+              "source": {"$ref": "#/$defs/untrusted_source"},
+              "content_digest": {"$ref": "#/$defs/digest"}
+            },
+            "additionalProperties": false
+          }
+        ]
       }
     }
   },
   "$defs": {
+    "untrusted_source": {
+      "enum": ["web", "memory", "tool_output", "inter_agent", "retrieval", "other"]
+    },
     "identifier": {
       "type": "string",
       "minLength": 1,

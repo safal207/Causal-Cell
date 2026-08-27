@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlsplit
 
 from .canonical import digest_json, format_timestamp, parse_timestamp, proposal_digest
 from .models import Decision, DecisionStatus
-
 
 PROPOSAL_PROFILE = "org.causalcell.action-proposal.v0.1"
 POLICY_PROFILE = "org.causalcell.policy.v0.1"
@@ -89,7 +90,13 @@ UNTRUSTED_SOURCE_FINDINGS = {
 
 
 def _nonempty(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and value == value.strip()
+    if type(value) is not str:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        return False
+    return bool(value.strip()) and value == value.strip()
 
 
 def _unique(values: list[str]) -> tuple[str, ...]:
@@ -115,20 +122,32 @@ def _decision(
     )
 
 
-def _normalize_destination(value: Any) -> str | None:
-    if not isinstance(value, str) or not value:
+def normalize_https_origin(value: Any) -> str | None:
+    """Return the canonical HTTPS origin used for egress authorization."""
+
+    if type(value) is not str or not value:
         return None
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
     if parsed.scheme.lower() != "https" or not parsed.hostname:
         return None
     if parsed.username or parsed.password:
         return None
     host = parsed.hostname.lower().rstrip(".")
+    if not host:
+        return None
     try:
         port = parsed.port
     except ValueError:
         return None
-    authority = host if port in (None, 443) else f"{host}:{port}"
+    rendered_host = f"[{host}]" if ":" in host else host
+    authority = (
+        rendered_host
+        if port in (None, 443)
+        else f"{rendered_host}:{port}"
+    )
     return f"https://{authority}"
 
 
@@ -163,7 +182,11 @@ def _structural_reasons(proposal: Mapping[str, Any]) -> list[str]:
         reasons.append("MALFORMED_PROPOSAL")
     if proposal.keys() - ALLOWED_FIELDS:
         reasons.append("UNKNOWN_PROPOSAL_FIELD")
-    if proposal.get("schema_version") != 1 or proposal.get("profile") != PROPOSAL_PROFILE:
+    if (
+        type(proposal.get("schema_version")) is not int
+        or proposal.get("schema_version") != 1
+        or proposal.get("profile") != PROPOSAL_PROFILE
+    ):
         reasons.append("MALFORMED_PROPOSAL")
     if any(not _nonempty(proposal.get(field)) for field in NONEMPTY_FIELDS):
         reasons.append("MALFORMED_PROPOSAL")
@@ -176,11 +199,17 @@ def _structural_reasons(proposal: Mapping[str, Any]) -> list[str]:
         value = proposal.get(nullable_identifier)
         if value is not None and not _nonempty(value):
             reasons.append("MALFORMED_PROPOSAL")
-    if proposal.get("reversibility") not in REVERSIBILITY_LEVELS:
+    reversibility = proposal.get("reversibility")
+    if type(reversibility) is not str or reversibility not in REVERSIBILITY_LEVELS:
         reasons.append("MALFORMED_PROPOSAL")
-    if proposal.get("risk_tier") not in RISK_LEVELS:
+    risk_tier = proposal.get("risk_tier")
+    if type(risk_tier) is not str or risk_tier not in RISK_LEVELS:
         reasons.append("MALFORMED_PROPOSAL")
-    if proposal.get("data_classification") not in DATA_CLASSES:
+    data_classification = proposal.get("data_classification")
+    if (
+        type(data_classification) is not str
+        or data_classification not in DATA_CLASSES
+    ):
         reasons.append("MALFORMED_PROPOSAL")
     if not isinstance(proposal.get("arguments"), Mapping):
         reasons.append("MALFORMED_PROPOSAL")
@@ -223,7 +252,12 @@ def _structural_reasons(proposal: Mapping[str, Any]) -> list[str]:
         ):
             reasons.append("MALFORMED_PROPOSAL")
         cost = budget.get("max_cost")
-        if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0:
+        if (
+            isinstance(cost, bool)
+            or not isinstance(cost, (int, float))
+            or not math.isfinite(cost)
+            or cost < 0
+        ):
             reasons.append("MALFORMED_PROPOSAL")
     metadata = proposal.get("metadata", {})
     if not isinstance(metadata, Mapping):
@@ -236,7 +270,54 @@ def _structural_reasons(proposal: Mapping[str, Any]) -> list[str]:
     return reasons
 
 
-def _policy_valid(policy: Mapping[str, Any]) -> bool:
+def _identifier_array_valid(value: Any) -> bool:
+    return (
+        type(value) is list
+        and all(_nonempty(item) for item in value)
+        and len(value) == len(set(value))
+    )
+
+
+def _approval_valid(approval: Any) -> bool:
+    required = {
+        "status",
+        "proposal_digest",
+        "arguments_digest",
+        "target",
+        "target_state_digest",
+        "policy_version",
+        "subject",
+        "auth_context_digest",
+        "expires_at",
+    }
+    if type(approval) is not dict or set(approval) != required:
+        return False
+    if approval["status"] not in {"ACTIVE", "REVOKED"}:
+        return False
+    if any(
+        type(approval[field]) is not str
+        or not DIGEST_RE.fullmatch(approval[field])
+        for field in (
+            "proposal_digest",
+            "arguments_digest",
+            "target_state_digest",
+            "auth_context_digest",
+        )
+    ):
+        return False
+    if any(
+        not _nonempty(approval[field])
+        for field in ("target", "policy_version", "subject", "expires_at")
+    ):
+        return False
+    try:
+        parse_timestamp(approval["expires_at"])
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _policy_valid_unchecked(policy: Mapping[str, Any]) -> bool:
     required = {
         "schema_version",
         "profile",
@@ -257,39 +338,69 @@ def _policy_valid(policy: Mapping[str, Any]) -> bool:
         "max_resource_budget",
         "approvals",
     }
-    if policy.get("schema_version") != 1 or policy.get("profile") != POLICY_PROFILE:
+    if (
+        type(policy.get("schema_version")) is not int
+        or policy.get("schema_version") != 1
+        or type(policy.get("profile")) is not str
+        or policy.get("profile") != POLICY_PROFILE
+        or not _nonempty(policy.get("policy_version"))
+    ):
         return False
     if set(policy) != required:
         return False
-    list_fields = required - {
-        "schema_version",
-        "profile",
-        "policy_version",
-        "allowed_action_scopes",
-        "require_approval_for_irreversible",
-        "max_resource_budget",
-        "approvals",
+    identifier_array_fields = {
+        "allowed_subjects",
+        "allowed_agents",
+        "allowed_workloads",
+        "allowed_actions",
+        "allowed_scopes",
+        "network_scopes",
+        "allowed_destinations",
+        "allowed_secret_destinations",
     }
-    if any(not isinstance(policy.get(field), list) for field in list_fields):
+    if any(
+        not _identifier_array_valid(policy.get(field))
+        for field in identifier_array_fields
+    ):
         return False
     action_scopes = policy.get("allowed_action_scopes")
-    if not isinstance(action_scopes, Mapping):
+    if type(action_scopes) is not dict or not action_scopes:
         return False
     allowed_actions = policy["allowed_actions"]
     policy_scopes = policy["allowed_scopes"]
-    if any(not _nonempty(action) for action in allowed_actions) or any(
-        not _nonempty(scope) for scope in policy_scopes
-    ):
-        return False
     allowed_scopes = set(policy_scopes)
     if set(action_scopes) != set(allowed_actions) or any(
-        not isinstance(scopes, list)
+        not _nonempty(action)
+        or not _identifier_array_valid(scopes)
         or not scopes
-        or any(not _nonempty(scope) or scope not in allowed_scopes for scope in scopes)
-        for scopes in action_scopes.values()
+        or any(scope not in allowed_scopes for scope in scopes)
+        for action, scopes in action_scopes.items()
     ):
         return False
-    if not isinstance(policy.get("max_resource_budget"), Mapping):
+    trusted_tools = policy.get("trusted_tools")
+    if type(trusted_tools) is not list or any(
+        type(tool) is not dict
+        or set(tool) != {"origin", "version", "schema_digest"}
+        or not _nonempty(tool["origin"])
+        or not _nonempty(tool["version"])
+        or type(tool["schema_digest"]) is not str
+        or not DIGEST_RE.fullmatch(tool["schema_digest"])
+        for tool in trusted_tools
+    ):
+        return False
+    delegation_chains = policy.get("allowed_delegation_chains")
+    if type(delegation_chains) is not list or any(
+        not _identifier_array_valid(chain) for chain in delegation_chains
+    ):
+        return False
+    risk_tiers = policy.get("approval_required_risk_tiers")
+    if (
+        type(risk_tiers) is not list
+        or len(risk_tiers) != len(set(risk_tiers))
+        or any(item not in RISK_LEVELS for item in risk_tiers)
+    ):
+        return False
+    if type(policy.get("max_resource_budget")) is not dict:
         return False
     budget = policy["max_resource_budget"]
     if set(budget) != BUDGET_FIELDS:
@@ -307,15 +418,31 @@ def _policy_valid(policy: Mapping[str, Any]) -> bool:
     ):
         return False
     cost = budget.get("max_cost")
-    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0:
+    if (
+        isinstance(cost, bool)
+        or not isinstance(cost, (int, float))
+        or not math.isfinite(cost)
+        or cost < 0
+    ):
         return False
-    if not isinstance(policy.get("approvals"), Mapping):
+    approvals = policy.get("approvals")
+    if type(approvals) is not dict or any(
+        not _nonempty(approval_ref) or not _approval_valid(approval)
+        for approval_ref, approval in approvals.items()
+    ):
         return False
-    if any(item not in RISK_LEVELS for item in policy["approval_required_risk_tiers"]):
+    return type(
+        policy.get("require_approval_for_irreversible")
+    ) is bool
+
+
+def validate_policy_document(policy: Mapping[str, Any]) -> bool:
+    """Validate a policy shape without letting hostile values escape."""
+
+    try:
+        return _policy_valid_unchecked(policy)
+    except (AttributeError, KeyError, TypeError, ValueError):
         return False
-    return _nonempty(policy.get("policy_version")) and isinstance(
-        policy.get("require_approval_for_irreversible"), bool
-    )
 
 
 def _approval_reasons(
@@ -365,7 +492,7 @@ def evaluate_proposal(
     structural = _structural_reasons(proposal)
     if structural:
         return _decision(DecisionStatus.BLOCK, structural, findings, proposal, now)
-    if not _policy_valid(policy):
+    if not validate_policy_document(policy):
         return _decision(DecisionStatus.BLOCK, ["POLICY_INVALID"], findings, proposal, now)
 
     reasons: list[str] = []
@@ -431,26 +558,30 @@ def evaluate_proposal(
     scope_is_network = proposal["scope"].startswith("network.") or proposal["scope"] in policy[
         "network_scopes"
     ]
-    destination = _normalize_destination(proposal["destination"])
+    destination = normalize_https_origin(proposal["destination"])
     allowed_destinations = {
         value
         for value in (
-            _normalize_destination(item) for item in policy["allowed_destinations"]
+            normalize_https_origin(item) for item in policy["allowed_destinations"]
         )
         if value is not None
     }
     secret_destinations = {
         value
         for value in (
-            _normalize_destination(item) for item in policy["allowed_secret_destinations"]
+            normalize_https_origin(item)
+            for item in policy["allowed_secret_destinations"]
         )
         if value is not None
     }
     if scope_is_network and (destination is None or destination not in allowed_destinations):
         reasons.append("DESTINATION_DENIED")
+    if not scope_is_network and proposal["destination"] is not None:
+        reasons.append("DESTINATION_SCOPE_MISMATCH")
     sensitive = proposal["contains_secret"] or proposal["data_classification"] in {
         "confidential",
         "restricted",
+        "unknown",
     }
     if scope_is_network and sensitive and (
         destination is None or destination not in secret_destinations
