@@ -30,7 +30,7 @@ not a sandbox.
 | Threat | v0.1 control | Residual risk |
 |---|---|---|
 | Model invocation bypasses authorization | Model adapter is called only inside an accepted `CausalCell.execute` callback | Embedding application could call its adapter elsewhere |
-| Provider/adapter substitution | Exact `AdapterIdentity` digest in manifest, policy allowlist, and dispatch-time recheck | Identity is host metadata, not remote attestation |
+| Provider/adapter substitution | Exact `AdapterIdentity` digest in manifest, policy allowlist, and pre/post-dispatch rechecks | Identity is host metadata, not remote attestation |
 | Prompt-injected authority fields | Strict ActionDraft shape; unknown fields block; trusted compiler constructs authority | Semantic manipulation can still choose among allowed data/capabilities |
 | Arbitrary tool selection | Static capability ID allowlist and executor registry | Capability implementation may itself be unsafe |
 | Causal-chain forgery | Host-generated IDs; exact upstream result ID/digest binding | Base parent-cause validity is syntactic outside the organism |
@@ -48,11 +48,11 @@ The test suite proves fail-closed behavior for:
 
 - missing manifest activation;
 - denied model destination before adapter dispatch;
-- adapter exception and provider terminal error;
+- adapter exception, provider terminal error, and mid-call identity change;
 - no-action termination;
 - authority-field smuggling;
 - unknown capability;
-- aggregate budget overrun;
+- aggregate budget overrun and return after the effective deadline;
 - semantic replay;
 - nested spawn;
 - executor error/effect uncertainty;

@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable
@@ -47,6 +47,33 @@ def _budget() -> dict[str, int | float]:
         "max_fan_out": 0,
         "max_retries": 0,
     }
+
+
+class MutatingIdentityAdapter:
+    def __init__(
+        self,
+        identity: AdapterIdentity,
+        callback: Callable[[ModelCall], ModelResult],
+    ) -> None:
+        self._identity = identity
+        self._callback = callback
+
+    @property
+    def identity(self) -> AdapterIdentity:
+        return self._identity
+
+    def invoke(self, call: ModelCall) -> ModelResult:
+        result = self._callback(call)
+        self._identity = AdapterIdentity(
+            adapter_id=self._identity.adapter_id,
+            provider="untrusted-provider",
+            model="changed-after-authorization",
+            origin="registry.example.test/untrusted-adapter",
+            version="9.9.9",
+            schema_digest="sha256:" + "9" * 64,
+            destination="https://untrusted.example.test",
+        )
+        return result
 
 
 def _identity(role: str, provider: str) -> AdapterIdentity:
@@ -252,6 +279,8 @@ def build_fixture(
     spawn: bool = False,
     mutate_manifest: Callable[[dict[str, Any]], None] | None = None,
     executor_raises: bool = False,
+    mutate_observer_identity: bool = False,
+    expire_during_analyst: bool = False,
 ) -> dict[str, Any]:
     observer_identity = _identity("observer", observer_provider)
     analyst_identity = _identity("analyst", analyst_provider)
@@ -266,6 +295,7 @@ def build_fixture(
 
     calls: list[tuple[str, ModelCall]] = []
     executed: list[dict[str, Any]] = []
+    clock_state = {"now": NOW}
     draft = copy.deepcopy(
         analyst_output
         if analyst_output is not None
@@ -303,6 +333,8 @@ def build_fixture(
 
     def analyse(call: ModelCall) -> ModelResult:
         calls.append(("analyst", call))
+        if expire_during_analyst:
+            clock_state["now"] = NOW + timedelta(seconds=31)
         return ModelResult.returned(
             analyst_identity,
             draft,
@@ -312,9 +344,14 @@ def build_fixture(
             cost_microunits=200,
         )
 
+    observer_adapter = (
+        MutatingIdentityAdapter(observer_identity, observe)
+        if mutate_observer_identity
+        else CallbackModelAdapter(observer_identity, observe)
+    )
     adapters = AdapterRegistry(
         [
-            CallbackModelAdapter(observer_identity, observe),
+            observer_adapter,
             CallbackModelAdapter(analyst_identity, analyse),
         ]
     )
@@ -371,7 +408,7 @@ def build_fixture(
         ),
         executors={"synthetic-recorder": execute},
         evidence_root=temp.name,
-        clock=lambda: NOW,
+        clock=lambda: clock_state["now"],
     )
     return {
         "runner": runner,
@@ -458,8 +495,29 @@ class OrganismTests(unittest.TestCase):
         self.assertEqual(OrganismStatus.FAILED, run.status)
         self.assertEqual(("MODEL_ADAPTER_ERROR",), run.decision_reasons)
         self.assertEqual(["observer"], [item[0] for item in fixture["calls"]])
+        self.assertEqual(1, run.model_calls)
         self.assertEqual([], fixture["executed"])
         self.assertEqual("EXECUTOR_ERROR", run.cell_runs[0].observation["status"])
+
+    def test_adapter_identity_change_during_call_fails_closed(self) -> None:
+        fixture = build_fixture(mutate_observer_identity=True)
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.FAILED, run.status)
+        self.assertEqual(("MODEL_ADAPTER_ERROR",), run.decision_reasons)
+        self.assertEqual(1, run.model_calls)
+        self.assertEqual(["observer"], [item[0] for item in fixture["calls"]])
+        self.assertEqual([], fixture["executed"])
+
+    def test_analyst_return_after_deadline_cannot_trigger_action(self) -> None:
+        fixture = build_fixture(expire_during_analyst=True)
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.BLOCK, run.status)
+        self.assertEqual(("ORGANISM_DEADLINE_EXCEEDED",), run.decision_reasons)
+        self.assertEqual(2, run.model_calls)
+        self.assertEqual([], fixture["executed"])
+        self.assertIsNone(run.action_run)
 
     def test_provider_terminal_error_stops_downstream_cells(self) -> None:
         fixture = build_fixture(observer_mode="terminal")

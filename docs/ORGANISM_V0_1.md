@@ -87,7 +87,9 @@ The only supported pipeline is:
 
 Required global limits are three stages, two model calls, zero retries, and fan-out
 of one. Token, cost, and deadline caps are also bound in the manifest and capped
-by trusted policy.
+by trusted policy. The runner passes the earlier of the context expiry and
+manifest deadline into every guarded proposal, then checks it again after each
+adapter returns and before final dispatch.
 
 A manifest digest covers the whole manifest except the digest field itself.
 `StaticActivationRegistry` requires an exact match on organism ID, digest,
@@ -186,7 +188,8 @@ interchangeability without credentials or network access.
 
 Organism v0.1 is a reference kernel, not a production isolation boundary:
 
-- adapters and executors are synchronous, in-process callbacks;
+- adapters and executors are synchronous, in-process callbacks; an over-deadline
+  callback cannot be preempted, though downstream dispatch is blocked;
 - replay and semantic-run stores are process-local;
 - provider identity and usage are adapter-reported, not independently attested;
 - budgets are per run and not distributed reservations;

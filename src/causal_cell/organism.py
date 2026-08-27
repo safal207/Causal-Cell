@@ -719,7 +719,10 @@ class OrganismRunner:
             model_results=tuple(model_results),
             cell_runs=tuple(cell_runs),
             action_run=action_run,
-            model_calls=len(model_results),
+            model_calls=sum(
+                int(item.observation.get("executor_invoked", False))
+                for item in cell_runs
+            ),
             reported_tokens=sum(
                 item.input_tokens + item.output_tokens for item in model_results
             ),
@@ -847,6 +850,21 @@ class OrganismRunner:
 
         limits = self._manifest["limits"]
         started_at = now
+        effective_deadline = min(
+            expires_at,
+            started_at + timedelta(seconds=limits["max_seconds"]),
+        )
+        effective_context = RunContext(
+            subject=context.subject,
+            intent_id=context.intent_id,
+            parent_cause=context.parent_cause,
+            auth_context_digest=context.auth_context_digest,
+            issued_at=context.issued_at,
+            expires_at=format_timestamp(effective_deadline),
+            action_approval_ref=context.action_approval_ref,
+            contains_secret=context.contains_secret,
+            data_classification=context.data_classification,
+        )
         model_results: list[ModelResult] = []
         cell_runs: list[CellRun] = []
         total_tokens = 0
@@ -860,10 +878,7 @@ class OrganismRunner:
 
         for stage in MODEL_STAGES:
             current = self._clock().astimezone(UTC)
-            if (
-                current >= expires_at
-                or current > started_at + timedelta(seconds=limits["max_seconds"])
-            ):
+            if current >= effective_deadline:
                 return self._result(
                     status=OrganismStatus.BLOCK,
                     terminal_stage=stage,
@@ -908,6 +923,19 @@ class OrganismRunner:
                     cell_runs=cell_runs,
                     action_run=None,
                 )
+            adapter_identity = adapter.identity
+            if adapter_identity.identity_digest != cell["adapter_identity_digest"]:
+                return self._result(
+                    status=OrganismStatus.BLOCK,
+                    terminal_stage=stage,
+                    reasons=("ADAPTER_PROVENANCE_DENIED",),
+                    manifest_decision=manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
             span_id = f"{run_id}:span:{stage}"
             call = ModelCall(
                 run_id=run_id,
@@ -920,7 +948,7 @@ class OrganismRunner:
                 parent_cause=parent_cause,
                 payload=copy.deepcopy(dict(payload)),
                 payload_digest=digest_json(payload),
-                deadline_at=context.expires_at,
+                deadline_at=format_timestamp(effective_deadline),
                 max_output_tokens=limits["max_output_tokens_per_call"],
                 data_classification=context.data_classification,
             )
@@ -928,8 +956,8 @@ class OrganismRunner:
                 manifest=self._manifest,
                 stage=stage,
                 call=call,
-                adapter_identity=adapter.identity,
-                context=context,
+                adapter_identity=adapter_identity,
+                context=effective_context,
                 parent_request_id=parent_request_id,
             )
             result_box: list[ModelResult] = []
@@ -939,6 +967,8 @@ class OrganismRunner:
                 if adapter.identity.identity_digest != expected_identity_digest:
                     raise RuntimeError("adapter provenance changed")
                 result = adapter.invoke(call)
+                if adapter.identity.identity_digest != expected_identity_digest:
+                    raise RuntimeError("adapter provenance changed")
                 result_box.append(result)
                 return result.to_record()
 
@@ -978,7 +1008,7 @@ class OrganismRunner:
                     action_run=None,
                 )
             result = result_box[0]
-            result_reasons = validate_model_result(result, adapter.identity, call)
+            result_reasons = validate_model_result(result, adapter_identity, call)
             model_results.append(result)
             if result_reasons:
                 return self._result(
@@ -1023,6 +1053,18 @@ class OrganismRunner:
                             else "MODEL_ERROR"
                         ),
                     ),
+                    manifest_decision=manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
+            if self._clock().astimezone(UTC) >= effective_deadline:
+                return self._result(
+                    status=OrganismStatus.BLOCK,
+                    terminal_stage=stage,
+                    reasons=("ORGANISM_DEADLINE_EXCEEDED",),
                     manifest_decision=manifest_decision,
                     run_id=run_id,
                     trace_id=trace_id,
@@ -1092,7 +1134,7 @@ class OrganismRunner:
             prepared = self._proposal_factory.action_from_draft(
                 draft=draft,
                 manifest=self._manifest,
-                context=context,
+                context=effective_context,
                 run_id=run_id,
                 trace_id=trace_id,
                 parent_span_id=parent_span_id,
@@ -1140,6 +1182,18 @@ class OrganismRunner:
                 status=OrganismStatus.BLOCK,
                 terminal_stage="action_guard",
                 reasons=("NESTED_SPAWN_DENIED",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        if self._clock().astimezone(UTC) >= effective_deadline:
+            return self._result(
+                status=OrganismStatus.BLOCK,
+                terminal_stage="action_guard",
+                reasons=("ORGANISM_DEADLINE_EXCEEDED",),
                 manifest_decision=manifest_decision,
                 run_id=run_id,
                 trace_id=trace_id,
