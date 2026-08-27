@@ -33,3 +33,5 @@ jobs:
         run: python -m benchmarks.run_safety_matrix
       - name: Synthetic smart-contract flow
         run: python examples/smart_contract_release.py --evidence-root "${{ runner.temp }}/causal-cell-evidence"
+      - name: Offline mixed-provider organism
+        run: python examples/multi_model_organism.py
