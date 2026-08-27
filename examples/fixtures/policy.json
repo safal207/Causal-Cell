@@ -1,0 +1,31 @@
+{
+  "allowed_actions": ["inspect_contract", "release_payment", "send_payload"],
+  "allowed_agents": ["agent:contract-qa"],
+  "allowed_delegation_chains": [["user:alice", "agent:trusted-delegate"]],
+  "allowed_destinations": ["https://evidence.example.test"],
+  "allowed_scopes": ["contract.read", "contract.write", "network.egress"],
+  "allowed_secret_destinations": ["https://evidence.example.test"],
+  "allowed_subjects": ["user:alice"],
+  "allowed_workloads": ["workload:local-reference"],
+  "approval_required_risk_tiers": ["high", "critical"],
+  "approvals": {},
+  "max_resource_budget": {
+    "max_cost": 10.0,
+    "max_fan_out": 2,
+    "max_retries": 2,
+    "max_seconds": 60,
+    "max_steps": 10
+  },
+  "network_scopes": ["network.egress"],
+  "policy_version": "policy-2026-08-27",
+  "profile": "org.causalcell.policy.v0.1",
+  "require_approval_for_irreversible": true,
+  "schema_version": 1,
+  "trusted_tools": [
+    {
+      "origin": "registry.example.test/contract-reader",
+      "schema_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "version": "1.0.0"
+    }
+  ]
+}

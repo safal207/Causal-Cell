@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:causal-cell:schema:action-proposal:v0.1",
+  "title": "Causal Cell action proposal v0.1",
+  "description": "A provider-neutral proposal. Schema validity is not authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "trace_id",
+    "span_id",
+    "parent_span_id",
+    "request_id",
+    "attempt_id",
+    "parent_request_id",
+    "retry_of_attempt_id",
+    "agent",
+    "workload",
+    "subject",
+    "method",
+    "intent_id",
+    "parent_cause",
+    "action",
+    "scope",
+    "target",
+    "target_state_digest",
+    "reversibility",
+    "approval_ref",
+    "nonce",
+    "risk_tier",
+    "policy_version",
+    "proposal_digest",
+    "arguments",
+    "arguments_digest",
+    "idempotency_key",
+    "issued_at",
+    "expires_at",
+    "tool_origin",
+    "tool_version",
+    "tool_schema_digest",
+    "auth_context_digest",
+    "contains_secret",
+    "destination",
+    "data_classification",
+    "delegation_chain",
+    "resource_budget"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "profile": {"const": "org.causalcell.action-proposal.v0.1"},
+    "trace_id": {"$ref": "#/$defs/identifier"},
+    "span_id": {"$ref": "#/$defs/identifier"},
+    "parent_span_id": {"$ref": "#/$defs/nullable_identifier"},
+    "request_id": {"$ref": "#/$defs/identifier"},
+    "attempt_id": {"$ref": "#/$defs/identifier"},
+    "parent_request_id": {"$ref": "#/$defs/nullable_identifier"},
+    "retry_of_attempt_id": {"$ref": "#/$defs/nullable_identifier"},
+    "agent": {"$ref": "#/$defs/identifier"},
+    "workload": {"$ref": "#/$defs/identifier"},
+    "subject": {"$ref": "#/$defs/identifier"},
+    "method": {"$ref": "#/$defs/identifier"},
+    "intent_id": {"$ref": "#/$defs/identifier"},
+    "parent_cause": {"$ref": "#/$defs/identifier"},
+    "action": {"$ref": "#/$defs/identifier"},
+    "scope": {"$ref": "#/$defs/identifier"},
+    "target": {"$ref": "#/$defs/identifier"},
+    "target_state_digest": {"$ref": "#/$defs/digest"},
+    "reversibility": {"enum": ["reversible", "irreversible", "unknown"]},
+    "approval_ref": {"$ref": "#/$defs/nullable_identifier"},
+    "nonce": {"$ref": "#/$defs/identifier"},
+    "risk_tier": {"enum": ["low", "medium", "high", "critical"]},
+    "policy_version": {"$ref": "#/$defs/identifier"},
+    "proposal_digest": {"$ref": "#/$defs/digest"},
+    "arguments": {"type": "object"},
+    "arguments_digest": {"$ref": "#/$defs/digest"},
+    "idempotency_key": {"$ref": "#/$defs/identifier"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "tool_origin": {"$ref": "#/$defs/identifier"},
+    "tool_version": {"$ref": "#/$defs/identifier"},
+    "tool_schema_digest": {"$ref": "#/$defs/digest"},
+    "auth_context_digest": {"$ref": "#/$defs/digest"},
+    "contains_secret": {"type": "boolean"},
+    "destination": {
+      "anyOf": [
+        {"type": "string", "format": "uri", "minLength": 1},
+        {"type": "null"}
+      ]
+    },
+    "data_classification": {
+      "enum": ["public", "internal", "confidential", "restricted", "unknown"]
+    },
+    "delegation_chain": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "resource_budget": {"$ref": "#/$defs/resource_budget"},
+    "metadata": {"type": "object"},
+    "untrusted_context": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "content"],
+        "properties": {
+          "source": {
+            "enum": ["web", "memory", "tool_output", "inter_agent", "retrieval", "other"]
+          },
+          "content": {}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\s)[\\s\\S]*\\S$"
+    },
+    "nullable_identifier": {
+      "anyOf": [
+        {"$ref": "#/$defs/identifier"},
+        {"type": "null"}
+      ]
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "resource_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_steps", "max_seconds", "max_cost", "max_fan_out", "max_retries"],
+      "properties": {
+        "max_steps": {"type": "integer", "minimum": 1},
+        "max_seconds": {"type": "integer", "minimum": 1},
+        "max_cost": {"type": "number", "minimum": 0},
+        "max_fan_out": {"type": "integer", "minimum": 0},
+        "max_retries": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
