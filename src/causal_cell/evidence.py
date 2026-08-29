@@ -6,12 +6,12 @@ import json
 import os
 import re
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .canonical import canonical_bytes, digest_bytes, digest_json
 from .models import EvidenceVerification
-
 
 BUNDLE_RE = re.compile(r"^cc-[a-f0-9]{32}$")
 RECORD_FILES = {

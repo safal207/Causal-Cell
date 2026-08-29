@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Sequence
 from datetime import datetime
-from typing import Sequence
 
 from .canonical import parse_timestamp
 from .evidence import load_json_strict, verify_bundle

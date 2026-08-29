@@ -6,7 +6,6 @@ from typing import Any
 
 from causal_cell import bind_proposal
 
-
 NOW = datetime(2026, 8, 27, 21, 0, tzinfo=UTC)
 TOOL_SCHEMA_DIGEST = "sha256:" + "a" * 64
 TARGET_STATE_DIGEST = "sha256:" + "c" * 64

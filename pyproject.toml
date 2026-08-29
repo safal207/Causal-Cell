@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "causal-cell"
-version = "0.1.0"
-description = "Provider-neutral reference kernel for evidence-first agent actions"
+version = "0.2.0"
+description = "Provider-neutral guarded kernel for evidence-first agent actions and organisms"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}

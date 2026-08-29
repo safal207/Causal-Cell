@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Mapping
-
+from collections.abc import Mapping
+from typing import Any
 
 SPAN_FIELDS = ("trace_id", "span_id", "parent_span_id")
 

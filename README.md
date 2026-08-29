@@ -7,7 +7,7 @@ output as a proposal, evaluates trusted authority and policy before dispatch,
 and preserves authorization, observation, continuity, and evidence as separate
 records.
 
-Status: `v0.1.0` alpha reference implementation.
+Status: `v0.2.0` alpha reference implementation; Organism protocol `v0.1`.
 
 ```mermaid
 flowchart TD
@@ -34,12 +34,49 @@ proposal ≠ authorization ≠ execution ≠ observation ≠ verification
 - Every attempt receives a unique evidence directory; a replay cannot overwrite
   the original attempt.
 
+## Multi-model organisms
+
+Organism v0.1 composes two provider-neutral model adapters and one capability
+executor without giving any LLM authority:
+
+```mermaid
+flowchart TD
+    O["Observer adapter"] --> A["Analyst adapter"]
+    A --> D["Strict ActionDraft"]
+    D --> C["Trusted compiler"]
+    C --> X["Guarded executor"]
+```
+
+Each model adapter invocation is itself guarded because it can spend money and
+cross a network boundary. The analyst may return only a capability ID, target,
+and data arguments. The trusted host supplies identity, scope, policy, tool
+provenance, causal IDs, replay keys, budgets, target-state resolution, and
+conservative data-label rules.
+Organism v0.1 sets `approval_ref` to `None` and rejects approval-required
+policies or capabilities because it has no plan/resume protocol.
+
+OpenAI, Anthropic, Gemini, a local model, or another provider can occupy either
+model role through the same `ModelAdapter` contract. Exact adapter identity is
+digest-bound in the manifest and explicitly activated by the host. Recursive
+`create_organism` / `organism.spawn` actions are hard-blocked.
+
+Real adapters must disable SDK-side tools/functions/agent handoffs or route each
+effect through another guarded cell. Network capabilities bind URL-like targets
+to one canonical, host-owned HTTPS destination origin, including canonical IP
+literals; trusted executors must not reinterpret opaque model arguments as
+alternate endpoints.
+
+See [Organism v0.1](docs/ORGANISM_V0_1.md), its
+[threat model](docs/ORGANISM_THREAT_MODEL.md), and the
+[offline mixed-provider example](examples/multi_model_organism.py).
+
 ## Quick start
 
 ```bash
 python -m pip install --no-deps -e .
 python -m unittest discover -s tests -v
 python -m benchmarks.run_safety_matrix
+python examples/multi_model_organism.py
 ```
 
 Evaluate a proposal without executing anything:
@@ -108,18 +145,22 @@ detection claims.
 
 ## Honest boundaries
 
-Version `v0.1` does **not** provide:
+Version `v0.2` does **not** provide:
 
-- an OS/container/VM sandbox — the Python callback is in-process;
-- a persistent or distributed nonce transaction;
-- cryptographic approval signatures or key management;
-- independent truth verification of an executor response;
+- an OS/container/VM sandbox — adapter and executor callbacks are in-process;
+- persistent or distributed nonce, semantic-run, or budget transactions;
+- cryptographic approval signatures, key management, or provider attestation;
+- independent truth verification of a model or executor response;
 - blockchain finality, evidence authenticity, or complete history;
-- external exactly-once side effects.
+- external exactly-once side effects;
+- dynamic organism topology, retries, parallel fan-out, recursive spawn, or
+  approval-required organism actions; or
+- a separately signed aggregate organism evidence bundle.
 
-Production callers must use a durable atomic replay store and a thin adapter to
-an externally contained executor. See [the specification](docs/SPEC_V0_1.md)
-and [threat model](docs/THREAT_MODEL.md).
+Production callers must use durable atomic stores and thin adapters to externally
+contained model/tool executors. See [the base specification](docs/SPEC_V0_1.md),
+[base threat model](docs/THREAT_MODEL.md), and
+[organism limitations](docs/ORGANISM_V0_1.md#production-limitations).
 
 ## License
 

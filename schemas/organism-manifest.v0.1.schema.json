@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://causal-cell.example/schema/organism-manifest.v0.1.schema.json",
+  "title": "Causal Cell Organism Manifest v0.1",
+  "description": "Fixed three-stage organism: guarded observer, guarded analyst, guarded executor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "organism_id",
+    "manifest_version",
+    "manifest_digest",
+    "policy_version",
+    "pipeline",
+    "limits"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "profile": {
+      "const": "org.causalcell.organism-manifest.v0.1"
+    },
+    "organism_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+    },
+    "manifest_version": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "policy_version": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+    },
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observer",
+        "analyst",
+        "executor"
+      ],
+      "properties": {
+        "observer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cell_id",
+            "agent_id",
+            "adapter_id",
+            "adapter_identity_digest",
+            "invocation_action",
+            "invocation_scope",
+            "resource_budget"
+          ],
+          "properties": {
+            "cell_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "agent_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "adapter_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "adapter_identity_digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "invocation_action": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!create_organism$)(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "invocation_scope": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!organism\\.spawn$)(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "resource_budget": {
+              "$ref": "#/$defs/resourceBudget"
+            }
+          }
+        },
+        "analyst": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cell_id",
+            "agent_id",
+            "adapter_id",
+            "adapter_identity_digest",
+            "invocation_action",
+            "invocation_scope",
+            "resource_budget"
+          ],
+          "properties": {
+            "cell_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "agent_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "adapter_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "adapter_identity_digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "invocation_action": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!create_organism$)(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "invocation_scope": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!organism\\.spawn$)(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "resource_budget": {
+              "$ref": "#/$defs/resourceBudget"
+            }
+          }
+        },
+        "executor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cell_id",
+            "agent_id",
+            "allowed_capability_ids"
+          ],
+          "properties": {
+            "cell_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "agent_id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+            },
+            "allowed_capability_ids": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_steps",
+        "max_seconds",
+        "max_model_calls",
+        "max_output_tokens_per_call",
+        "max_total_tokens",
+        "max_cost_microunits_per_call",
+        "max_total_cost_microunits",
+        "max_retries",
+        "max_fan_out"
+      ],
+      "properties": {
+        "max_steps": {
+          "const": 3
+        },
+        "max_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_model_calls": {
+          "const": 2
+        },
+        "max_output_tokens_per_call": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_total_tokens": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "max_cost_microunits_per_call": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_total_cost_microunits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_retries": {
+          "const": 0
+        },
+        "max_fan_out": {
+          "const": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "resourceBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_steps",
+        "max_seconds",
+        "max_cost",
+        "max_fan_out",
+        "max_retries"
+      ],
+      "properties": {
+        "max_steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_fan_out": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

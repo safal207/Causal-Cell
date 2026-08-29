@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import copy
 import threading
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
-from .canonical import digest_json, format_timestamp
+from .canonical import digest_json, format_timestamp, require_aware_utc
 from .evidence import write_bundle
 from .guard import evaluate_proposal
 from .ltp import export_ltp_continuity_input
 from .models import CellRun, Decision, DecisionStatus
-
 
 Executor = Callable[[Mapping[str, Any]], Any]
 Clock = Callable[[], datetime]
@@ -79,8 +79,10 @@ class CausalCell:
     ) -> None:
         self._policy = copy.deepcopy(dict(policy))
         self._evidence_root = Path(evidence_root)
-        self._nonces = nonce_store or InMemoryNonceStore()
-        self._clock = clock or _default_clock
+        self._nonces = (
+            nonce_store if nonce_store is not None else InMemoryNonceStore()
+        )
+        self._clock = clock if clock is not None else _default_clock
 
     def execute(self, proposal: Mapping[str, Any], executor: Executor) -> CellRun:
         """Evaluate, conditionally dispatch, and preserve separate evidence layers.
@@ -90,16 +92,20 @@ class CausalCell:
         """
 
         exact_proposal = copy.deepcopy(dict(proposal))
-        now = self._clock().astimezone(UTC)
+        now = require_aware_utc(self._clock())
         decision = evaluate_proposal(exact_proposal, self._policy, now=now)
+        evidence_time = now
         nonce_consumed = False
         executor_invoked = False
         result_digest: str | None = None
         error_type: str | None = None
 
         if decision.status is DecisionStatus.ACCEPT:
+            evidence_time = require_aware_utc(self._clock())
             decision = evaluate_proposal(
-                exact_proposal, self._policy, now=self._clock().astimezone(UTC)
+                exact_proposal,
+                self._policy,
+                now=evidence_time,
             )
         if decision.status is DecisionStatus.ACCEPT:
             replay_reason = self._nonces.consume(
@@ -122,7 +128,7 @@ class CausalCell:
         if decision.status is not DecisionStatus.ACCEPT:
             observation_status = "NOT_INVOKED"
 
-        captured_at = format_timestamp(self._clock().astimezone(UTC))
+        captured_at = format_timestamp(evidence_time)
         observation_id = (
             f"obs:{exact_proposal.get('trace_id', 'unknown')}:"
             f"{exact_proposal.get('attempt_id', 'unknown')}"

@@ -6,7 +6,6 @@ import tempfile
 from typing import Any
 
 from causal_cell import CausalCell, DecisionStatus, evaluate_proposal
-
 from tests.helpers import NOW, approved_irreversible, base_policy, base_proposal, rebound
 
 

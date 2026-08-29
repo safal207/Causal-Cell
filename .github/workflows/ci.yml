@@ -25,6 +25,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install local package
         run: python -m pip install --disable-pip-version-check --no-deps -e .
+      - name: Install lint tool
+        run: python -m pip install --disable-pip-version-check --no-deps ruff==0.16.5
+      - name: Lint
+        run: python -m ruff check .
       - name: Compile
         run: python -m compileall -q src tests examples benchmarks
       - name: Unit and negative-path tests
@@ -33,3 +37,5 @@ jobs:
         run: python -m benchmarks.run_safety_matrix
       - name: Synthetic smart-contract flow
         run: python examples/smart_contract_release.py --evidence-root "${{ runner.temp }}/causal-cell-evidence"
+      - name: Offline mixed-provider organism
+        run: python examples/multi_model_organism.py
