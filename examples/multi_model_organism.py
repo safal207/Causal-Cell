@@ -30,11 +30,11 @@ from causal_cell import (
     StaticCapability,
     StaticProposalFactory,
     bind_organism_manifest,
+    digest_json,
 )
 
 NOW = datetime(2026, 8, 27, 21, 0, tzinfo=UTC)
 AUTH_DIGEST = "sha256:" + "d" * 64
-TARGET_DIGEST = "sha256:" + "c" * 64
 RECORDER_SCHEMA_DIGEST = "sha256:" + "e" * 64
 
 
@@ -202,7 +202,12 @@ def build_runner(evidence_root: Path) -> tuple[OrganismRunner, list[dict[str, An
         tool_origin="registry.example.test/synthetic-recorder",
         tool_version="1.0.0",
         tool_schema_digest=RECORDER_SCHEMA_DIGEST,
-        target_state_digest=TARGET_DIGEST,
+        target_state_resolver=lambda target, _arguments: digest_json(
+            {
+                "target": target,
+                "synthetic_state": {"revision": "demo-v1"},
+            }
+        ),
         reversibility="reversible",
         risk_tier="low",
         allowed_target_prefixes=("resource:",),

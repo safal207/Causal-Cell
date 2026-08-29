@@ -85,12 +85,12 @@
             "invocation_action": {
               "type": "string",
               "minLength": 1,
-              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+              "pattern": "^(?!create_organism$)(?!\\s)(?:.|\\n)*\\S$"
             },
             "invocation_scope": {
               "type": "string",
               "minLength": 1,
-              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+              "pattern": "^(?!organism\\.spawn$)(?!\\s)(?:.|\\n)*\\S$"
             },
             "resource_budget": {
               "$ref": "#/$defs/resourceBudget"
@@ -132,12 +132,12 @@
             "invocation_action": {
               "type": "string",
               "minLength": 1,
-              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+              "pattern": "^(?!create_organism$)(?!\\s)(?:.|\\n)*\\S$"
             },
             "invocation_scope": {
               "type": "string",
               "minLength": 1,
-              "pattern": "^(?!\\s)(?:.|\\n)*\\S$"
+              "pattern": "^(?!organism\\.spawn$)(?!\\s)(?:.|\\n)*\\S$"
             },
             "resource_budget": {
               "$ref": "#/$defs/resourceBudget"

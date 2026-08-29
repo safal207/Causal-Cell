@@ -7,13 +7,14 @@ provider correlation IDs are evidence only, never authorization.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
-from .canonical import digest_json, snapshot_json
+from .canonical import canonical_bytes, digest_bytes, digest_json, snapshot_json
 
 DATA_CLASSIFICATIONS = {
     "public",
@@ -88,7 +89,7 @@ class AdapterIdentity:
         return digest_json(self.to_record())
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ModelCall:
     run_id: str
     organism_id: str
@@ -98,11 +99,64 @@ class ModelCall:
     parent_span_id: str | None
     intent_id: str
     parent_cause: str
-    payload: Mapping[str, Any]
+    _payload_bytes: bytes = field(repr=False)
     payload_digest: str
     deadline_at: str
     max_output_tokens: int
+    contains_secret: bool
     data_classification: str
+
+    def __init__(
+        self,
+        run_id: str,
+        organism_id: str,
+        stage: str,
+        trace_id: str,
+        span_id: str,
+        parent_span_id: str | None,
+        intent_id: str,
+        parent_cause: str,
+        payload: Mapping[str, Any],
+        payload_digest: str,
+        deadline_at: str,
+        max_output_tokens: int,
+        contains_secret: bool,
+        data_classification: str,
+    ) -> None:
+        detached_payload = snapshot_json(payload)
+        if type(detached_payload) is not dict:
+            raise TypeError("model-call payload must be a JSON object")
+        payload_bytes = canonical_bytes(detached_payload)
+        if digest_bytes(payload_bytes) != payload_digest:
+            raise ValueError("model-call payload digest mismatch")
+
+        values = {
+            "run_id": run_id,
+            "organism_id": organism_id,
+            "stage": stage,
+            "trace_id": trace_id,
+            "span_id": span_id,
+            "parent_span_id": parent_span_id,
+            "intent_id": intent_id,
+            "parent_cause": parent_cause,
+            "_payload_bytes": payload_bytes,
+            "payload_digest": payload_digest,
+            "deadline_at": deadline_at,
+            "max_output_tokens": max_output_tokens,
+            "contains_secret": contains_secret,
+            "data_classification": data_classification,
+        }
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """Return a detached copy so adapters cannot mutate the bound snapshot."""
+
+        loaded = json.loads(self._payload_bytes)
+        if type(loaded) is not dict:
+            raise TypeError("stored model-call payload must be a JSON object")
+        return loaded
 
     def to_record(self, *, include_payload: bool = False) -> dict[str, Any]:
         record = {
@@ -119,17 +173,18 @@ class ModelCall:
             "payload_digest": self.payload_digest,
             "deadline_at": self.deadline_at,
             "max_output_tokens": self.max_output_tokens,
+            "contains_secret": self.contains_secret,
             "data_classification": self.data_classification,
         }
         if include_payload:
-            record["payload"] = copy.deepcopy(dict(self.payload))
+            record["payload"] = self.payload
         return record
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ModelResult:
     status: ModelResultStatus
-    output: Mapping[str, Any] | None
+    _output_bytes: bytes | None = field(repr=False)
     output_digest: str | None
     provider_request_id: str | None
     provider: str
@@ -140,6 +195,55 @@ class ModelResult:
     contains_secret: bool
     data_classification: str
     error_code: str | None
+
+    def __init__(
+        self,
+        status: ModelResultStatus,
+        output: Mapping[str, Any] | None,
+        output_digest: str | None,
+        provider_request_id: str | None,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_microunits: int,
+        contains_secret: bool,
+        data_classification: str,
+        error_code: str | None,
+    ) -> None:
+        stored_output = None if output is None else snapshot_json(output)
+        if stored_output is not None and type(stored_output) is not dict:
+            raise TypeError("model-result output must be a JSON object")
+        output_bytes = (
+            None if stored_output is None else canonical_bytes(stored_output)
+        )
+        values = {
+            "status": status,
+            "_output_bytes": output_bytes,
+            "output_digest": output_digest,
+            "provider_request_id": provider_request_id,
+            "provider": provider,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_microunits": cost_microunits,
+            "contains_secret": contains_secret,
+            "data_classification": data_classification,
+            "error_code": error_code,
+        }
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+
+    @property
+    def output(self) -> Mapping[str, Any] | None:
+        """Return detached provider data so retained results stay digest-bound."""
+
+        if self._output_bytes is None:
+            return None
+        loaded = json.loads(self._output_bytes)
+        if type(loaded) is not dict:
+            raise TypeError("stored model-result output must be a JSON object")
+        return loaded
 
     @classmethod
     def returned(

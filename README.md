@@ -50,7 +50,8 @@ flowchart TD
 Each model adapter invocation is itself guarded because it can spend money and
 cross a network boundary. The analyst may return only a capability ID, target,
 and data arguments. The trusted host supplies identity, scope, policy, tool
-provenance, causal IDs, replay keys, budgets, and conservative data-label rules.
+provenance, causal IDs, replay keys, budgets, target-state resolution, and
+conservative data-label rules.
 Organism v0.1 sets `approval_ref` to `None` and rejects approval-required
 policies or capabilities because it has no plan/resume protocol.
 
@@ -61,8 +62,9 @@ digest-bound in the manifest and explicitly activated by the host. Recursive
 
 Real adapters must disable SDK-side tools/functions/agent handoffs or route each
 effect through another guarded cell. Network capabilities bind URL-like targets
-to one canonical, host-owned HTTPS destination origin; trusted executors must not
-reinterpret opaque model arguments as alternate endpoints.
+to one canonical, host-owned HTTPS destination origin, including canonical IP
+literals; trusted executors must not reinterpret opaque model arguments as
+alternate endpoints.
 
 See [Organism v0.1](docs/ORGANISM_V0_1.md), its
 [threat model](docs/ORGANISM_THREAT_MODEL.md), and the

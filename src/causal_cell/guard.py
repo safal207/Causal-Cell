@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
 from collections.abc import Mapping
@@ -9,7 +10,13 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from .canonical import digest_json, format_timestamp, parse_timestamp, proposal_digest
+from .canonical import (
+    digest_json,
+    format_timestamp,
+    parse_timestamp,
+    proposal_digest,
+    require_aware_utc,
+)
 from .models import Decision, DecisionStatus
 
 PROPOSAL_PROFILE = "org.causalcell.action-proposal.v0.1"
@@ -138,6 +145,12 @@ def normalize_https_origin(value: Any) -> str | None:
     host = parsed.hostname.lower().rstrip(".")
     if not host:
         return None
+    if "%" in host:
+        return None
+    try:
+        host = ipaddress.ip_address(host).compressed.lower()
+    except ValueError:
+        pass
     try:
         port = parsed.port
     except ValueError:
@@ -487,7 +500,7 @@ def evaluate_proposal(
 ) -> Decision:
     """Evaluate one exact proposal without performing a side effect."""
 
-    now = (now or datetime.now(UTC)).astimezone(UTC)
+    now = require_aware_utc(datetime.now(UTC) if now is None else now)
     findings = _untrusted_findings(proposal)
     structural = _structural_reasons(proposal)
     if structural:

@@ -149,6 +149,19 @@ def parse_timestamp(value: str) -> datetime:
         raise ValueError("timestamp is outside the supported UTC range") from exc
 
 
+def require_aware_utc(value: Any) -> datetime:
+    """Return an exact, timezone-aware ``datetime`` normalized to UTC."""
+
+    if type(value) is not datetime or value.tzinfo is None:
+        raise ValueError("datetime must be an exact timezone-aware value")
+    try:
+        if value.utcoffset() is None:
+            raise ValueError("datetime must be timezone-aware")
+        return value.astimezone(UTC)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError("datetime is outside the supported UTC range") from exc
+
+
 def format_timestamp(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("datetime must be timezone-aware")

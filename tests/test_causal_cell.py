@@ -33,6 +33,13 @@ class GuardTests(unittest.TestCase):
             "https://[::1]:8443",
             normalize_https_origin("https://[::1]:8443/path"),
         )
+        self.assertEqual(
+            "https://[::1]",
+            normalize_https_origin(
+                "https://[0:0:0:0:0:0:0:1]:443/path"
+            ),
+        )
+        self.assertIsNone(normalize_https_origin("https://[fe80::1%25eth0]/"))
         self.assertIsNone(normalize_https_origin("https://."))
 
     def test_safe_and_approval_paths(self) -> None:
@@ -388,6 +395,61 @@ class RuntimeEvidenceTests(unittest.TestCase):
             replay = cell.execute(new_nonce, executor)
             self.assertIn("IDEMPOTENCY_REPLAYED", replay.decision.reasons)
             self.assertEqual(calls, 1)
+
+    def test_falsey_injected_nonce_store_is_not_replaced(self) -> None:
+        class FalseyNonceStore(InMemoryNonceStore):
+            def __bool__(self) -> bool:
+                return False
+
+        with tempfile.TemporaryDirectory() as root:
+            calls = 0
+            nonces = FalseyNonceStore()
+
+            def executor(_: dict[str, object]) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return {"ok": True}
+
+            first = self._cell(root, nonces).execute(base_proposal(), executor)
+            second = self._cell(root, nonces).execute(base_proposal(), executor)
+
+            self.assertEqual(DecisionStatus.ACCEPT, first.decision.status)
+            self.assertEqual(DecisionStatus.BLOCK, second.decision.status)
+            self.assertIn("INTENT_REPLAYED", second.decision.reasons)
+            self.assertEqual(1, calls)
+
+    def test_clock_preserves_falsey_callable_and_rejects_naive_time(self) -> None:
+        class FalseyClock:
+            def __call__(self):
+                return NOW
+
+            def __bool__(self) -> bool:
+                return False
+
+        with tempfile.TemporaryDirectory() as root:
+            clock = FalseyClock()
+            cell = CausalCell(base_policy(), root, clock=clock)
+            run = cell.execute(base_proposal(), lambda _: {"ok": True})
+
+            self.assertIs(cell._clock, clock)
+            self.assertEqual(DecisionStatus.ACCEPT, run.decision.status)
+
+        with tempfile.TemporaryDirectory() as root:
+            calls = 0
+
+            def executor(_: dict[str, object]) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return {"ok": True}
+
+            cell = CausalCell(
+                base_policy(),
+                root,
+                clock=lambda: NOW.replace(tzinfo=None),
+            )
+            with self.assertRaisesRegex(ValueError, "timezone-aware"):
+                cell.execute(base_proposal(), executor)
+            self.assertEqual(0, calls)
 
     def test_executor_failure_and_path_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as root:

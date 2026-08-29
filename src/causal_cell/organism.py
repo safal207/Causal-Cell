@@ -39,6 +39,7 @@ from .canonical import (
     digest_json,
     format_timestamp,
     parse_timestamp,
+    require_aware_utc,
     snapshot_json,
 )
 from .guard import normalize_https_origin, validate_policy_document
@@ -280,7 +281,7 @@ class StaticCapability:
     tool_origin: str
     tool_version: str
     tool_schema_digest: str
-    target_state_digest: str
+    target_state_resolver: Callable[[str, Mapping[str, Any]], str]
     reversibility: str
     risk_tier: str
     allowed_target_prefixes: tuple[str, ...]
@@ -322,6 +323,12 @@ class OrganismRun:
 
 
 class ProposalCompilationError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class ProposalInfrastructureError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
@@ -445,6 +452,15 @@ def _canonical_https_target(target: str) -> str | None:
     return canonical
 
 
+def _target_prefix_can_reach_destination(prefix: str, destination: str) -> bool:
+    if not _looks_like_network_locator(prefix):
+        return True
+    canonical_prefix = _canonical_https_target(prefix)
+    if canonical_prefix is not None:
+        return normalize_https_origin(canonical_prefix) == destination
+    return _target_matches_prefix(destination + "/", prefix)
+
+
 def _policy_statically_allows(
     policy: Mapping[str, Any],
     *,
@@ -543,7 +559,7 @@ def evaluate_organism_manifest(
 ) -> OrganismDecision:
     """Validate an exact fixed-topology manifest and its host activation."""
 
-    now = (now or datetime.now(UTC)).astimezone(UTC)
+    now = require_aware_utc(datetime.now(UTC) if now is None else now)
     try:
         detached_manifest = snapshot_json(manifest)
         if not isinstance(detached_manifest, dict):
@@ -625,6 +641,11 @@ def evaluate_organism_manifest(
         ):
             reasons.append("MANIFEST_CELL_INVALID")
         else:
+            if (
+                cell["invocation_action"] == "create_organism"
+                or cell["invocation_scope"] == "organism.spawn"
+            ):
+                reasons.append("NESTED_SPAWN_DENIED")
             cell_id = cell["cell_id"]
             agent_id = cell["agent_id"]
             if cell_id in seen_cells or agent_id in seen_agents:
@@ -646,7 +667,8 @@ def evaluate_organism_manifest(
                 reasons.append("ADAPTER_PROVENANCE_DENIED")
                 continue
             if (
-                cell.get("adapter_identity_digest") != identity_digest
+                identity.adapter_id != cell["adapter_id"]
+                or cell.get("adapter_identity_digest") != identity_digest
                 or identity_digest not in policy.allowed_adapter_identity_digests
             ):
                 reasons.append("ADAPTER_PROVENANCE_DENIED")
@@ -808,7 +830,6 @@ class StaticProposalFactory:
                 capability.tool_origin,
                 capability.tool_version,
                 capability.tool_schema_digest,
-                capability.target_state_digest,
                 capability.reversibility,
                 capability.risk_tier,
                 capability.data_classification,
@@ -816,7 +837,6 @@ class StaticProposalFactory:
             if (
                 not all(_nonempty(value) for value in scalar_fields)
                 or not DIGEST_RE.fullmatch(capability.tool_schema_digest)
-                or not DIGEST_RE.fullmatch(capability.target_state_digest)
                 or (
                     capability.destination is not None
                     and not _nonempty(capability.destination)
@@ -845,7 +865,12 @@ class StaticProposalFactory:
                 normalized = replace(
                     capability,
                     allowed_target_prefixes=tuple(
-                        capability.allowed_target_prefixes
+                        (
+                            _canonical_https_target(prefix) or prefix
+                            if _looks_like_network_locator(prefix)
+                            else prefix
+                        )
+                        for prefix in capability.allowed_target_prefixes
                     ),
                     allowed_argument_keys=frozenset(
                         capability.allowed_argument_keys
@@ -877,15 +902,25 @@ class StaticProposalFactory:
                     normalized,
                     destination=canonical_destination,
                 )
+            target_prefix_can_reach_destination = True
+            if normalized.destination is not None:
+                target_prefix_can_reach_destination = any(
+                    _target_prefix_can_reach_destination(
+                        prefix,
+                        normalized.destination,
+                    )
+                    for prefix in normalized.allowed_target_prefixes
+                )
             if (
                 normalized.reversibility != "reversible"
                 or normalized.risk_tier not in {"low", "medium"}
                 or not normalized.allowed_target_prefixes
                 or any(
-                    not _nonempty(item)
+                    item is None or not _nonempty(item)
                     for item in normalized.allowed_target_prefixes
                 )
                 or not callable(normalized.target_validator)
+                or not callable(normalized.target_state_resolver)
                 or not normalized.required_argument_keys.issubset(
                     normalized.allowed_argument_keys
                 )
@@ -898,6 +933,7 @@ class StaticProposalFactory:
                     normalized.scope.startswith("network.")
                     and normalized.destination is None
                 )
+                or not target_prefix_can_reach_destination
             ):
                 raise ValueError("invalid or approval-requiring capability")
             normalized_capabilities.append(normalized)
@@ -925,6 +961,11 @@ class StaticProposalFactory:
             capability = self._capabilities.get(capability_id)
             if capability is None:
                 return ("CAPABILITY_UNKNOWN",)
+            if (
+                capability.action == "create_organism"
+                or capability.scope == "organism.spawn"
+            ):
+                return ("NESTED_SPAWN_DENIED",)
             if not callable(executors.get(capability.executor_id)):
                 return ("EXECUTOR_UNKNOWN",)
         return ()
@@ -1066,37 +1107,30 @@ class StaticProposalFactory:
         if capability_id not in allowed:
             raise ProposalCompilationError("CAPABILITY_DENIED")
         target = draft["target"]
-        if not any(
-            _target_matches_prefix(target, prefix)
-            for prefix in capability.allowed_target_prefixes
-        ):
-            raise ProposalCompilationError("TARGET_DENIED")
-        try:
-            target_valid = capability.target_validator(target)
-        except Exception:
-            target_valid = False
-        if target_valid is not True:
-            raise ProposalCompilationError("TARGET_DENIED")
         compiled_target = target
         if _looks_like_network_locator(target):
             compiled_target = _canonical_https_target(target)
+            if compiled_target is None:
+                raise ProposalCompilationError("TARGET_DENIED")
             if (
-                compiled_target is None
-                or capability.destination is None
+                capability.destination is None
                 or normalize_https_origin(compiled_target)
                 != capability.destination
             ):
                 raise ProposalCompilationError(
                     "TARGET_DESTINATION_MISMATCH"
                 )
-            try:
-                canonical_target_valid = capability.target_validator(
-                    compiled_target
-                )
-            except Exception:
-                canonical_target_valid = False
-            if canonical_target_valid is not True:
-                raise ProposalCompilationError("TARGET_DENIED")
+        if not any(
+            _target_matches_prefix(compiled_target, prefix)
+            for prefix in capability.allowed_target_prefixes
+        ):
+            raise ProposalCompilationError("TARGET_DENIED")
+        try:
+            target_valid = capability.target_validator(compiled_target)
+        except Exception:
+            target_valid = False
+        if target_valid is not True:
+            raise ProposalCompilationError("TARGET_DENIED")
         arguments = snapshot_json(draft["arguments"])
         keys = set(arguments)
         if (
@@ -1112,6 +1146,20 @@ class StaticProposalFactory:
             arguments_valid = False
         if arguments_valid is not True:
             raise ProposalCompilationError("ARGUMENTS_DENIED")
+        try:
+            target_state_digest = capability.target_state_resolver(
+                compiled_target,
+                snapshot_json(arguments),
+            )
+        except Exception:
+            raise ProposalInfrastructureError(
+                "TARGET_STATE_RESOLUTION_FAILED"
+            ) from None
+        if (
+            type(target_state_digest) is not str
+            or not DIGEST_RE.fullmatch(target_state_digest)
+        ):
+            raise ProposalCompilationError("TARGET_STATE_RESOLUTION_FAILED")
         arguments_digest = digest_json(arguments)
         semantic_action_digest = digest_json(
             {
@@ -1144,7 +1192,7 @@ class StaticProposalFactory:
             "action": capability.action,
             "scope": capability.scope,
             "target": compiled_target,
-            "target_state_digest": capability.target_state_digest,
+            "target_state_digest": target_state_digest,
             "reversibility": capability.reversibility,
             "approval_ref": None,
             "nonce": f"nonce:{run_id}:action",
@@ -1276,9 +1324,15 @@ class OrganismRunner:
                 "PROPOSAL_FACTORY_POLICY_MISMATCH",
             )
         self._evidence_root = Path(evidence_root)
-        self._clock = clock or (lambda: datetime.now(UTC))
-        self._nonces = nonce_store or InMemoryNonceStore()
-        self._organisms = organism_store or InMemoryOrganismStore()
+        self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
+        self._nonces = (
+            nonce_store if nonce_store is not None else InMemoryNonceStore()
+        )
+        self._organisms = (
+            organism_store
+            if organism_store is not None
+            else InMemoryOrganismStore()
+        )
 
     def _result(
         self,
@@ -1354,7 +1408,26 @@ class OrganismRunner:
     ) -> OrganismRun:
         run_id = f"orun-{uuid.uuid4().hex}"
         trace_id = f"otrace-{uuid.uuid4().hex}"
-        now = self._clock().astimezone(UTC)
+        try:
+            now = require_aware_utc(self._clock())
+        except Exception:
+            failed_at = datetime.now(UTC)
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="context",
+                reasons=("CLOCK_ERROR",),
+                manifest_decision=_manifest_decision(
+                    DecisionStatus.BLOCK,
+                    ("CLOCK_ERROR",),
+                    self._manifest,
+                    failed_at,
+                ),
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
         empty_decision = _manifest_decision(
             DecisionStatus.BLOCK, ("CONTEXT_INVALID",), self._manifest, now
         )
@@ -1420,14 +1493,45 @@ class OrganismRunner:
                 action_run=None,
             )
 
-        manifest_decision = evaluate_organism_manifest(
-            self._manifest,
-            self._organism_policy,
-            self._adapters,
-            self._activations,
-            subject=context.subject,
-            now=now,
-        )
+        def revalidate_manifest(
+            at: datetime,
+        ) -> tuple[OrganismDecision, datetime | None]:
+            activation_registry = self._activations
+            decision = evaluate_organism_manifest(
+                self._manifest,
+                self._organism_policy,
+                self._adapters,
+                activation_registry,
+                subject=context.subject,
+                now=at,
+            )
+            active_until = None
+            if decision.status is DecisionStatus.ACCEPT:
+                active_until = activation_registry.active_until(
+                    organism_id=self._manifest["organism_id"],
+                    manifest_digest=self._manifest["manifest_digest"],
+                    subject=context.subject,
+                    policy_version=self._manifest["policy_version"],
+                    now=at,
+                )
+                if active_until is None:
+                    raise RuntimeError("accepted manifest has no active activation")
+            return decision, active_until
+
+        try:
+            manifest_decision, _ = revalidate_manifest(now)
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="manifest",
+                reasons=("CONTROL_PLANE_ERROR",),
+                manifest_decision=empty_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
         if manifest_decision.status is not DecisionStatus.ACCEPT:
             return self._result(
                 status=(
@@ -1508,13 +1612,66 @@ class OrganismRunner:
                 action_run=None,
             )
 
-        activation_expires_at = self._activations.active_until(
-            organism_id=self._manifest["organism_id"],
-            manifest_digest=self._manifest["manifest_digest"],
-            subject=context.subject,
-            policy_version=self._manifest["policy_version"],
-            now=now,
-        )
+        try:
+            pre_dispatch_now = require_aware_utc(self._clock())
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="manifest",
+                reasons=("CLOCK_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        if pre_dispatch_now >= expires_at:
+            return self._result(
+                status=OrganismStatus.BLOCK,
+                terminal_stage="context",
+                reasons=("CONTEXT_TIME_INVALID",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        try:
+            (
+                refreshed_manifest_decision,
+                activation_expires_at,
+            ) = revalidate_manifest(pre_dispatch_now)
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="manifest",
+                reasons=("CONTROL_PLANE_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        if refreshed_manifest_decision.status is not DecisionStatus.ACCEPT:
+            return self._result(
+                status=(
+                    OrganismStatus.HOLD
+                    if refreshed_manifest_decision.status is DecisionStatus.HOLD
+                    else OrganismStatus.BLOCK
+                ),
+                terminal_stage="manifest",
+                reasons=refreshed_manifest_decision.reasons,
+                manifest_decision=refreshed_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        manifest_decision = refreshed_manifest_decision
         if activation_expires_at is None:
             return self._result(
                 status=OrganismStatus.BLOCK,
@@ -1528,6 +1685,131 @@ class OrganismRunner:
                 action_run=None,
             )
 
+        try:
+            reservation_check_now = require_aware_utc(self._clock())
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="manifest",
+                reasons=("CLOCK_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        if reservation_check_now >= expires_at:
+            return self._result(
+                status=OrganismStatus.BLOCK,
+                terminal_stage="context",
+                reasons=("CONTEXT_TIME_INVALID",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        try:
+            (
+                reservation_manifest_decision,
+                reservation_activation_expires_at,
+            ) = revalidate_manifest(reservation_check_now)
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="manifest",
+                reasons=("CONTROL_PLANE_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        if reservation_manifest_decision.status is not DecisionStatus.ACCEPT:
+            return self._result(
+                status=(
+                    OrganismStatus.HOLD
+                    if reservation_manifest_decision.status
+                    is DecisionStatus.HOLD
+                    else OrganismStatus.BLOCK
+                ),
+                terminal_stage="manifest",
+                reasons=reservation_manifest_decision.reasons,
+                manifest_decision=reservation_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        if reservation_activation_expires_at is None:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="manifest",
+                reasons=("CONTROL_PLANE_ERROR",),
+                manifest_decision=reservation_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        try:
+            reservation_now = require_aware_utc(self._clock())
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="manifest",
+                reasons=("CLOCK_ERROR",),
+                manifest_decision=reservation_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        if reservation_now >= expires_at:
+            return self._result(
+                status=OrganismStatus.BLOCK,
+                terminal_stage="context",
+                reasons=("CONTEXT_TIME_INVALID",),
+                manifest_decision=reservation_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        if reservation_now >= reservation_activation_expires_at:
+            expired_activation_decision = _manifest_decision(
+                DecisionStatus.BLOCK,
+                ("MANIFEST_ACTIVATION_EXPIRED",),
+                self._manifest,
+                reservation_now,
+            )
+            return self._result(
+                status=OrganismStatus.BLOCK,
+                terminal_stage="manifest",
+                reasons=expired_activation_decision.reasons,
+                manifest_decision=expired_activation_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        manifest_decision = reservation_manifest_decision
+        activation_expires_at = reservation_activation_expires_at
+        limits = self._manifest["limits"]
+        started_at = reservation_now
+        effective_deadline = min(
+            expires_at,
+            activation_expires_at,
+            _deadline_after(started_at, limits["max_seconds"]),
+        )
         semantic_run_key = digest_json(
             {
                 "organism_id": self._manifest["organism_id"],
@@ -1538,7 +1820,21 @@ class OrganismRunner:
                 "root_input_digest": root_digest,
             }
         )
-        if not self._organisms.consume_run(semantic_run_key):
+        try:
+            semantic_run_consumed = self._organisms.consume_run(semantic_run_key)
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="manifest",
+                reasons=("SEMANTIC_STORE_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=[],
+                cell_runs=[],
+                action_run=None,
+            )
+        if not semantic_run_consumed:
             return self._result(
                 status=OrganismStatus.BLOCK,
                 terminal_stage="manifest",
@@ -1551,13 +1847,6 @@ class OrganismRunner:
                 action_run=None,
             )
 
-        limits = self._manifest["limits"]
-        started_at = now
-        effective_deadline = min(
-            expires_at,
-            activation_expires_at,
-            _deadline_after(started_at, limits["max_seconds"]),
-        )
         effective_context = RunContext(
             subject=context.subject,
             intent_id=context.intent_id,
@@ -1568,15 +1857,26 @@ class OrganismRunner:
             contains_secret=context.contains_secret,
             data_classification=context.data_classification,
         )
-        def revalidate_manifest(at: datetime) -> OrganismDecision:
-            return evaluate_organism_manifest(
-                self._manifest,
-                self._organism_policy,
-                self._adapters,
-                self._activations,
-                subject=context.subject,
-                now=at,
-            )
+
+        invoked_adapter_digests: dict[str, str] = {}
+
+        def invoked_adapter_provenance_changed() -> bool:
+            """Limit effect uncertainty to adapters whose invocation started."""
+
+            for adapter_id, expected_digest in invoked_adapter_digests.items():
+                adapter = self._adapters.get(adapter_id)
+                if adapter is None:
+                    return True
+                try:
+                    identity = adapter.identity
+                    if (
+                        type(identity) is not AdapterIdentity
+                        or identity.identity_digest != expected_digest
+                    ):
+                        return True
+                except Exception:
+                    return True
+            return False
 
         model_results: list[ModelResult] = []
         cell_runs: list[CellRun] = []
@@ -1590,13 +1890,42 @@ class OrganismRunner:
         upstream_result_digest: str | None = None
 
         for stage in MODEL_STAGES:
-            current = self._clock().astimezone(UTC)
-            runtime_manifest_decision = revalidate_manifest(current)
+            try:
+                current = require_aware_utc(self._clock())
+            except Exception:
+                return self._result(
+                    status=OrganismStatus.FAILED,
+                    terminal_stage=stage,
+                    reasons=("CLOCK_ERROR",),
+                    manifest_decision=manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
+            try:
+                (
+                    runtime_manifest_decision,
+                    runtime_activation_expires_at,
+                ) = revalidate_manifest(current)
+            except Exception:
+                return self._result(
+                    status=OrganismStatus.FAILED,
+                    terminal_stage=stage,
+                    reasons=("CONTROL_PLANE_ERROR",),
+                    manifest_decision=manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
             if runtime_manifest_decision.status is not DecisionStatus.ACCEPT:
                 provenance_uncertain = (
-                    bool(cell_runs)
-                    and "ADAPTER_PROVENANCE_DENIED"
+                    "ADAPTER_PROVENANCE_DENIED"
                     in runtime_manifest_decision.reasons
+                    and invoked_adapter_provenance_changed()
                 )
                 return self._result(
                     status=(
@@ -1622,6 +1951,26 @@ class OrganismRunner:
                     cell_runs=cell_runs,
                     action_run=None,
                 )
+            if runtime_activation_expires_at is None:
+                return self._result(
+                    status=OrganismStatus.FAILED,
+                    terminal_stage=stage,
+                    reasons=("CONTROL_PLANE_ERROR",),
+                    manifest_decision=runtime_manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
+            effective_deadline = min(
+                effective_deadline,
+                runtime_activation_expires_at,
+            )
+            effective_context = replace(
+                effective_context,
+                expires_at=format_timestamp(effective_deadline),
+            )
             if current >= effective_deadline:
                 return self._result(
                     status=OrganismStatus.BLOCK,
@@ -1727,6 +2076,7 @@ class OrganismRunner:
                 payload_digest=digest_json(payload),
                 deadline_at=format_timestamp(cell_deadline),
                 max_output_tokens=limits["max_output_tokens_per_call"],
+                contains_secret=effective_context.contains_secret,
                 data_classification=effective_context.data_classification,
             )
             proposal = self._proposal_factory.model_invocation(
@@ -1754,11 +2104,13 @@ class OrganismRunner:
                 results: list[ModelResult] = result_box,
                 invalid_reasons: list[tuple[str, ...]] = result_reasons_box,
                 observed_usage: list[tuple[int, int]] = observed_usage_box,
+                adapter_id_for_call: str = cell["adapter_id"],
             ) -> dict[str, Any]:
                 nonlocal adapter_invocation_started
                 nonlocal provenance_changed_after_invoke
                 if adapter_for_call.identity.identity_digest != expected_digest:
                     raise RuntimeError("adapter provenance changed before invoke")
+                invoked_adapter_digests[adapter_id_for_call] = expected_digest
                 adapter_invocation_started = True
                 raw_result = adapter_for_call.invoke(call_for_adapter)
                 if type(raw_result) is ModelResult:
@@ -1987,12 +2339,42 @@ class OrganismRunner:
                 ),
                 data_classification=joined_classification,
             )
-            current = self._clock().astimezone(UTC)
-            runtime_manifest_decision = revalidate_manifest(current)
+            try:
+                current = require_aware_utc(self._clock())
+            except Exception:
+                return self._result(
+                    status=OrganismStatus.FAILED,
+                    terminal_stage=stage,
+                    reasons=("CLOCK_ERROR",),
+                    manifest_decision=manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
+            try:
+                (
+                    runtime_manifest_decision,
+                    runtime_activation_expires_at,
+                ) = revalidate_manifest(current)
+            except Exception:
+                return self._result(
+                    status=OrganismStatus.FAILED,
+                    terminal_stage=stage,
+                    reasons=("CONTROL_PLANE_ERROR",),
+                    manifest_decision=manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
             if runtime_manifest_decision.status is not DecisionStatus.ACCEPT:
                 provenance_uncertain = (
                     "ADAPTER_PROVENANCE_DENIED"
                     in runtime_manifest_decision.reasons
+                    and invoked_adapter_provenance_changed()
                 )
                 return self._result(
                     status=(
@@ -2018,6 +2400,27 @@ class OrganismRunner:
                     cell_runs=cell_runs,
                     action_run=None,
                 )
+            if runtime_activation_expires_at is None:
+                return self._result(
+                    status=OrganismStatus.FAILED,
+                    terminal_stage=stage,
+                    reasons=("CONTROL_PLANE_ERROR",),
+                    manifest_decision=runtime_manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
+            effective_deadline = min(
+                effective_deadline,
+                runtime_activation_expires_at,
+            )
+            effective_context = replace(
+                effective_context,
+                expires_at=format_timestamp(effective_deadline),
+            )
+            cell_deadline = min(cell_deadline, effective_deadline)
             if current >= cell_deadline:
                 return self._result(
                     status=OrganismStatus.BLOCK,
@@ -2106,6 +2509,18 @@ class OrganismRunner:
                 upstream_result_id=upstream_result_id,
                 upstream_result_digest=upstream_result_digest,
             )
+        except ProposalInfrastructureError as exc:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="action_compile",
+                reasons=(exc.code,),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
         except ProposalCompilationError as exc:
             return self._result(
                 status=OrganismStatus.BLOCK,
@@ -2153,12 +2568,42 @@ class OrganismRunner:
                 cell_runs=cell_runs,
                 action_run=None,
             )
-        current = self._clock().astimezone(UTC)
-        runtime_manifest_decision = revalidate_manifest(current)
+        try:
+            current = require_aware_utc(self._clock())
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="action_guard",
+                reasons=("CLOCK_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        try:
+            (
+                runtime_manifest_decision,
+                runtime_activation_expires_at,
+            ) = revalidate_manifest(current)
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="action_guard",
+                reasons=("CONTROL_PLANE_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
         if runtime_manifest_decision.status is not DecisionStatus.ACCEPT:
             provenance_uncertain = (
                 "ADAPTER_PROVENANCE_DENIED"
                 in runtime_manifest_decision.reasons
+                and invoked_adapter_provenance_changed()
             )
             return self._result(
                 status=(
@@ -2184,6 +2629,26 @@ class OrganismRunner:
                 cell_runs=cell_runs,
                 action_run=None,
             )
+        if runtime_activation_expires_at is None:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="action_guard",
+                reasons=("CONTROL_PLANE_ERROR",),
+                manifest_decision=runtime_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        effective_deadline = min(
+            effective_deadline,
+            runtime_activation_expires_at,
+        )
+        effective_context = replace(
+            effective_context,
+            expires_at=format_timestamp(effective_deadline),
+        )
         if current >= effective_deadline:
             return self._result(
                 status=OrganismStatus.BLOCK,
@@ -2196,6 +2661,152 @@ class OrganismRunner:
                 cell_runs=cell_runs,
                 action_run=None,
             )
+        if action_proposal["expires_at"] != effective_context.expires_at:
+            try:
+                prepared = self._proposal_factory.action_from_draft(
+                    draft=draft,
+                    manifest=self._manifest,
+                    context=effective_context,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    parent_span_id=parent_span_id,
+                    parent_request_id=parent_request_id,
+                    upstream_result_id=upstream_result_id,
+                    upstream_result_digest=upstream_result_digest,
+                )
+            except ProposalInfrastructureError as exc:
+                return self._result(
+                    status=OrganismStatus.FAILED,
+                    terminal_stage="action_compile",
+                    reasons=(exc.code,),
+                    manifest_decision=manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
+            except ProposalCompilationError as exc:
+                return self._result(
+                    status=OrganismStatus.BLOCK,
+                    terminal_stage="action_compile",
+                    reasons=(exc.code,),
+                    manifest_decision=manifest_decision,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    model_results=model_results,
+                    cell_runs=cell_runs,
+                    action_run=None,
+                )
+            action_proposal = prepared.proposal
+        try:
+            post_compile_now = require_aware_utc(self._clock())
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="action_guard",
+                reasons=("CLOCK_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        try:
+            (
+                post_compile_manifest_decision,
+                post_compile_activation_expires_at,
+            ) = revalidate_manifest(post_compile_now)
+        except Exception:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="action_guard",
+                reasons=("CONTROL_PLANE_ERROR",),
+                manifest_decision=manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        if post_compile_manifest_decision.status is not DecisionStatus.ACCEPT:
+            provenance_uncertain = (
+                "ADAPTER_PROVENANCE_DENIED"
+                in post_compile_manifest_decision.reasons
+                and invoked_adapter_provenance_changed()
+            )
+            return self._result(
+                status=(
+                    OrganismStatus.EFFECT_UNCERTAIN
+                    if provenance_uncertain
+                    else (
+                        OrganismStatus.HOLD
+                        if post_compile_manifest_decision.status
+                        is DecisionStatus.HOLD
+                        else OrganismStatus.BLOCK
+                    )
+                ),
+                terminal_stage="action_guard",
+                reasons=(
+                    ("ADAPTER_PROVENANCE_CHANGED_EFFECT_UNCERTAIN",)
+                    if provenance_uncertain
+                    else post_compile_manifest_decision.reasons
+                ),
+                manifest_decision=post_compile_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        if post_compile_activation_expires_at is None:
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="action_guard",
+                reasons=("CONTROL_PLANE_ERROR",),
+                manifest_decision=post_compile_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        post_compile_deadline = min(
+            effective_deadline,
+            post_compile_activation_expires_at,
+        )
+        if post_compile_now >= post_compile_deadline:
+            return self._result(
+                status=OrganismStatus.BLOCK,
+                terminal_stage="action_guard",
+                reasons=("ORGANISM_DEADLINE_EXCEEDED",),
+                manifest_decision=post_compile_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        if action_proposal["expires_at"] != format_timestamp(
+            post_compile_deadline
+        ):
+            return self._result(
+                status=OrganismStatus.FAILED,
+                terminal_stage="action_guard",
+                reasons=("CONTROL_PLANE_UNSTABLE",),
+                manifest_decision=post_compile_manifest_decision,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_results=model_results,
+                cell_runs=cell_runs,
+                action_run=None,
+            )
+        effective_deadline = post_compile_deadline
+        effective_context = replace(
+            effective_context,
+            expires_at=format_timestamp(effective_deadline),
+        )
         executor = self._executors.get(prepared.executor_id)
         if executor is None:
             return self._result(

@@ -5,6 +5,7 @@ import json
 import re
 import unittest
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,17 +30,19 @@ from causal_cell.organism import (
     OrganismPolicy,
     OrganismRunner,
     OrganismStatus,
+    ProposalCompilationError,
+    ProposalInfrastructureError,
     RunContext,
     StaticActivationRegistry,
     StaticCapability,
     StaticProposalFactory,
     bind_organism_manifest,
+    evaluate_organism_manifest,
     validate_action_draft,
 )
 
 NOW = datetime(2026, 8, 27, 21, 0, tzinfo=UTC)
 AUTH_DIGEST = "sha256:" + "d" * 64
-TARGET_DIGEST = "sha256:" + "c" * 64
 RECORDER_SCHEMA_DIGEST = "sha256:" + "e" * 64
 _TEMP_DIRECTORIES: list[TemporaryDirectory] = []
 
@@ -152,8 +155,7 @@ class MutatingIdentityAdapter:
     def identity(self) -> AdapterIdentity:
         return self._identity
 
-    def invoke(self, call: ModelCall) -> ModelResult:
-        result = self._callback(call)
+    def mutate_identity(self) -> None:
         self._identity = AdapterIdentity(
             adapter_id=self._identity.adapter_id,
             provider="untrusted-provider",
@@ -163,6 +165,10 @@ class MutatingIdentityAdapter:
             schema_digest="sha256:" + "9" * 64,
             destination="https://untrusted.example.test",
         )
+
+    def invoke(self, call: ModelCall) -> ModelResult:
+        result = self._callback(call)
+        self.mutate_identity()
         return result
 
 
@@ -397,7 +403,12 @@ def _capability(
         tool_origin="registry.example.test/synthetic-recorder",
         tool_version="1.0.0",
         tool_schema_digest=RECORDER_SCHEMA_DIGEST,
-        target_state_digest=TARGET_DIGEST,
+        target_state_resolver=lambda target, _arguments: digest_json(
+            {
+                "target": target,
+                "synthetic_state": {"revision": "fixture-v1"},
+            }
+        ),
         reversibility="reversible",
         risk_tier="low",
         allowed_target_prefixes=target_prefixes,
@@ -465,6 +476,7 @@ def build_fixture(
     mutate_manifest: Callable[[dict[str, Any]], None] | None = None,
     executor_raises: bool = False,
     mutate_observer_identity: bool = False,
+    mutate_analyst_identity_during_observer: bool = False,
     fail_identity_after_invoke: bool = False,
     fail_identity_on_first_post_read: bool = False,
     advance_during_observer_seconds: int | None = None,
@@ -487,6 +499,7 @@ def build_fixture(
     omit_action_policy_capability: bool = False,
     organism_store: InMemoryOrganismStore | None = None,
     clock_now: datetime = NOW,
+    injected_clock: Callable[[], datetime] | None = None,
     context_issued_at: str = "2026-08-27T20:00:00Z",
     context_expires_at: str = "2026-08-27T22:00:00Z",
 ) -> dict[str, Any]:
@@ -664,6 +677,8 @@ def build_fixture(
             clock_state["now"] = clock_now + timedelta(
                 seconds=advance_during_observer_seconds
             )
+        if mutate_analyst_identity_during_observer:
+            analyst_adapter.mutate_identity()
         return result
 
     def analyse(call: ModelCall) -> ModelResult:
@@ -696,10 +711,15 @@ def build_fixture(
         )
     else:
         observer_adapter = CallbackModelAdapter(observer_identity, observe)
+    analyst_adapter = (
+        MutatingIdentityAdapter(analyst_identity, analyse)
+        if mutate_analyst_identity_during_observer
+        else CallbackModelAdapter(analyst_identity, analyse)
+    )
     adapters = AdapterRegistry(
         [
             observer_adapter,
-            CallbackModelAdapter(analyst_identity, analyse),
+            analyst_adapter,
         ]
     )
     organism_policy = OrganismPolicy(
@@ -797,7 +817,11 @@ def build_fixture(
         ),
         executors={} if omit_executor else {"synthetic-recorder": execute},
         evidence_root=evidence_root,
-        clock=lambda: clock_state["now"],
+        clock=(
+            injected_clock
+            if injected_clock is not None
+            else lambda: clock_state["now"]
+        ),
         nonce_store=nonce_store,
         organism_store=organism_store,
     )
@@ -830,6 +854,79 @@ class OrganismTests(unittest.TestCase):
     def tearDown(self) -> None:
         while _TEMP_DIRECTORIES:
             _TEMP_DIRECTORIES.pop().cleanup()
+
+    def test_model_call_payload_is_detached_digest_bound_and_labeled(self) -> None:
+        payload = {"nested": {"items": ["bound"]}}
+        call = ModelCall(
+            run_id="run:model-call",
+            organism_id="organism:demo",
+            stage="observer",
+            trace_id="trace:model-call",
+            span_id="span:model-call",
+            parent_span_id=None,
+            intent_id="intent:model-call",
+            parent_cause="cause:model-call",
+            payload=payload,
+            payload_digest=digest_json(payload),
+            deadline_at="2026-08-27T21:00:30Z",
+            max_output_tokens=64,
+            contains_secret=True,
+            data_classification="confidential",
+        )
+
+        payload["nested"]["items"].append("source-mutated")
+        adapter_view = call.payload
+        adapter_view["nested"]["items"].append("adapter-mutated")
+
+        self.assertEqual({"nested": {"items": ["bound"]}}, call.payload)
+        self.assertEqual(call.payload_digest, digest_json(call.payload))
+        self.assertIsInstance(call._payload_bytes, bytes)
+        self.assertFalse(hasattr(call, "_payload"))
+        self.assertTrue(call.contains_secret)
+        record = call.to_record(include_payload=True)
+        self.assertTrue(record["contains_secret"])
+        self.assertEqual({"nested": {"items": ["bound"]}}, record["payload"])
+
+        with self.assertRaisesRegex(ValueError, "payload digest mismatch"):
+            ModelCall(
+                run_id="run:model-call",
+                organism_id="organism:demo",
+                stage="observer",
+                trace_id="trace:model-call",
+                span_id="span:model-call",
+                parent_span_id=None,
+                intent_id="intent:model-call",
+                parent_cause="cause:model-call",
+                payload={"changed": True},
+                payload_digest=call.payload_digest,
+                deadline_at="2026-08-27T21:00:30Z",
+                max_output_tokens=64,
+                contains_secret=True,
+                data_classification="confidential",
+            )
+
+    def test_model_calls_receive_the_effective_secret_label(self) -> None:
+        fixture = build_fixture(sensitive_context=True)
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.COMPLETED, run.status)
+        self.assertEqual(2, len(fixture["calls"]))
+        self.assertTrue(all(call.contains_secret for _, call in fixture["calls"]))
+
+    def test_retained_model_results_cannot_be_mutated_out_of_digest(self) -> None:
+        fixture = build_fixture()
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.COMPLETED, run.status)
+        result = run.model_results[0]
+        exposed = result.output
+        assert exposed is not None
+        exposed["facts"].append("caller mutation")
+
+        self.assertNotIn("caller mutation", result.output["facts"])
+        self.assertEqual(result.output_digest, digest_json(result.output))
+        self.assertIsInstance(result._output_bytes, bytes)
+        self.assertFalse(hasattr(result, "_output"))
 
     def test_mixed_provider_happy_path_is_guarded_end_to_end(self) -> None:
         fixture = build_fixture()
@@ -988,6 +1085,16 @@ class OrganismTests(unittest.TestCase):
         self.assertEqual(["observer"], [item[0] for item in fixture["calls"]])
         self.assertEqual([], fixture["executed"])
 
+    def test_uninvoked_adapter_identity_change_blocks_without_uncertainty(self) -> None:
+        fixture = build_fixture(mutate_analyst_identity_during_observer=True)
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.BLOCK, run.status)
+        self.assertEqual(("ADAPTER_PROVENANCE_DENIED",), run.decision_reasons)
+        self.assertEqual(1, run.model_calls)
+        self.assertEqual(["observer"], [item[0] for item in fixture["calls"]])
+        self.assertEqual([], fixture["executed"])
+
     def test_analyst_return_after_deadline_cannot_trigger_action(self) -> None:
         fixture = build_fixture(advance_during_analyst_seconds=31)
         run = fixture["runner"].run(fixture["root"], fixture["context"])
@@ -1017,6 +1124,69 @@ class OrganismTests(unittest.TestCase):
             run.decision_reasons,
         )
         self.assertEqual(["observer"], [item[0] for item in fixture["calls"]])
+        self.assertEqual([], fixture["executed"])
+
+    def test_repeated_activation_rotation_cannot_escape_action_deadline(self) -> None:
+        fixture = build_fixture()
+        runner = fixture["runner"]
+        rotated = False
+        reads_after_rotation = 0
+        resolution_calls = 0
+
+        def clock() -> datetime:
+            nonlocal reads_after_rotation
+            if not rotated:
+                return NOW
+            reads_after_rotation += 1
+            return NOW if reads_after_rotation == 1 else NOW + timedelta(seconds=2)
+
+        def resolve_state(target: str, _arguments: dict[str, Any]) -> str:
+            nonlocal resolution_calls, rotated
+            resolution_calls += 1
+            if resolution_calls in {1, 2}:
+                manifest = fixture["manifest"]
+                runner._activations = StaticActivationRegistry(
+                    [
+                        ManifestActivation(
+                            organism_id=manifest["organism_id"],
+                            manifest_digest=manifest["manifest_digest"],
+                            subject=fixture["context"].subject,
+                            policy_version=manifest["policy_version"],
+                            expires_at=(
+                                "2026-08-27T21:00:10Z"
+                                if resolution_calls == 1
+                                else "2026-08-27T21:00:01Z"
+                            ),
+                        )
+                    ]
+                )
+                rotated = True
+            return digest_json(
+                {
+                    "target": target,
+                    "synthetic_state": {"revision": "rotated-v1"},
+                }
+            )
+
+        runner._clock = clock
+        runner._proposal_factory = StaticProposalFactory(
+            invocation_policy_version="invocation-policy-v1",
+            action_policy_version="action-policy-v1",
+            capabilities=[
+                replace(
+                    _capability(),
+                    target_state_resolver=resolve_state,
+                )
+            ],
+        )
+
+        run = runner.run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.BLOCK, run.status)
+        self.assertIsNone(run.action_run)
+        self.assertIn("MANIFEST_ACTIVATION_EXPIRED", run.decision_reasons)
+        self.assertEqual(2, run.model_calls)
+        self.assertEqual(2, resolution_calls)
         self.assertEqual([], fixture["executed"])
 
     def test_per_cell_deadline_blocks_late_analyst_result(self) -> None:
@@ -1158,11 +1328,11 @@ class OrganismTests(unittest.TestCase):
         fixture = build_fixture(observer_mode="mutable_output")
         run = fixture["runner"].run(fixture["root"], fixture["context"])
 
-        self.assertEqual(OrganismStatus.BLOCK, run.status)
-        self.assertEqual(("MODEL_OUTPUT_INVALID",), run.decision_reasons)
+        self.assertEqual(OrganismStatus.EFFECT_UNCERTAIN, run.status)
+        self.assertEqual(("MODEL_EFFECT_UNCERTAIN",), run.decision_reasons)
         self.assertEqual(1, run.model_calls)
-        self.assertEqual(9, run.reported_tokens)
-        self.assertEqual(100, run.reported_cost_microunits)
+        self.assertEqual(0, run.reported_tokens)
+        self.assertEqual(0, run.reported_cost_microunits)
         self.assertEqual([], fixture["executed"])
 
     def test_semantic_run_replay_is_atomic_and_fail_closed(self) -> None:
@@ -1178,6 +1348,215 @@ class OrganismTests(unittest.TestCase):
         self.assertEqual(call_count, len(fixture["calls"]))
         self.assertEqual(execution_count, len(fixture["executed"]))
         self.assertEqual(0, second.model_calls)
+
+    def test_semantic_run_replay_is_atomic_under_concurrency(self) -> None:
+        fixture = build_fixture()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            runs = list(
+                pool.map(
+                    lambda _: fixture["runner"].run(
+                        fixture["root"], fixture["context"]
+                    ),
+                    range(8),
+                )
+            )
+
+        self.assertEqual(
+            1,
+            sum(run.status is OrganismStatus.COMPLETED for run in runs),
+        )
+        self.assertEqual(
+            7,
+            sum(
+                run.decision_reasons == ("ORGANISM_REPLAYED",)
+                for run in runs
+            ),
+        )
+        self.assertEqual(2, len(fixture["calls"]))
+        self.assertEqual(1, len(fixture["executed"]))
+
+    def test_falsey_injected_organism_store_is_shared_across_runners(self) -> None:
+        class FalseyOrganismStore(InMemoryOrganismStore):
+            def __bool__(self) -> bool:
+                return False
+
+        organisms = FalseyOrganismStore()
+        nonces = InMemoryNonceStore()
+        first_fixture = build_fixture(
+            nonce_store=nonces,
+            organism_store=organisms,
+        )
+        second_fixture = build_fixture(
+            nonce_store=nonces,
+            organism_store=organisms,
+        )
+
+        first = first_fixture["runner"].run(
+            first_fixture["root"], first_fixture["context"]
+        )
+        second = second_fixture["runner"].run(
+            second_fixture["root"], second_fixture["context"]
+        )
+
+        self.assertEqual(OrganismStatus.COMPLETED, first.status)
+        self.assertEqual(OrganismStatus.BLOCK, second.status)
+        self.assertEqual(("ORGANISM_REPLAYED",), second.decision_reasons)
+        self.assertEqual([], second_fixture["calls"])
+        self.assertEqual([], second_fixture["executed"])
+
+    def test_semantic_store_failure_returns_a_terminal_run(self) -> None:
+        class FailingOrganismStore(InMemoryOrganismStore):
+            def consume_run(self, semantic_run_key: str) -> bool:
+                raise RuntimeError(f"synthetic store failure: {semantic_run_key}")
+
+        fixture = build_fixture(organism_store=FailingOrganismStore())
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.FAILED, run.status)
+        self.assertEqual(("SEMANTIC_STORE_ERROR",), run.decision_reasons)
+        self.assertEqual([], fixture["calls"])
+        self.assertEqual([], fixture["executed"])
+
+    def test_clock_failure_returns_a_terminal_run(self) -> None:
+        fixture = build_fixture()
+
+        def failing_clock() -> datetime:
+            raise RuntimeError("synthetic clock failure")
+
+        fixture["runner"]._clock = failing_clock
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.FAILED, run.status)
+        self.assertEqual(("CLOCK_ERROR",), run.decision_reasons)
+        self.assertEqual([], fixture["calls"])
+        self.assertEqual([], fixture["executed"])
+
+    def test_falsey_clock_is_preserved_and_naive_time_fails_closed(self) -> None:
+        class FalseyClock:
+            def __call__(self) -> datetime:
+                return NOW
+
+            def __bool__(self) -> bool:
+                return False
+
+        falsey_clock = FalseyClock()
+        fixture = build_fixture(injected_clock=falsey_clock)
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertIs(fixture["runner"]._clock, falsey_clock)
+        self.assertEqual(OrganismStatus.COMPLETED, run.status)
+
+        naive_fixture = build_fixture(
+            clock_now=datetime(2026, 8, 28, 4, 0),
+        )
+        naive_run = naive_fixture["runner"].run(
+            naive_fixture["root"],
+            naive_fixture["context"],
+        )
+
+        self.assertEqual(OrganismStatus.FAILED, naive_run.status)
+        self.assertEqual(("CLOCK_ERROR",), naive_run.decision_reasons)
+        self.assertEqual([], naive_fixture["calls"])
+        self.assertEqual([], naive_fixture["executed"])
+
+    def test_late_clock_failure_returns_failed_after_observer(self) -> None:
+        fixture = build_fixture()
+        reads = 0
+
+        def failing_after_observer() -> datetime:
+            nonlocal reads
+            reads += 1
+            if reads == 9:
+                raise RuntimeError("synthetic late clock failure")
+            return NOW
+
+        fixture["runner"]._clock = failing_after_observer
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.FAILED, run.status)
+        self.assertEqual(("CLOCK_ERROR",), run.decision_reasons)
+        self.assertEqual(["observer"], [item[0] for item in fixture["calls"]])
+        self.assertEqual(1, run.model_calls)
+        self.assertEqual([], fixture["executed"])
+
+    def test_expiry_during_preflight_does_not_consume_the_semantic_run(self) -> None:
+        fixture = build_fixture()
+        after_expiry = NOW + timedelta(minutes=46)
+        readings = iter((NOW, after_expiry))
+        fixture["runner"]._clock = lambda: next(readings)
+
+        first = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.BLOCK, first.status)
+        self.assertIn("MANIFEST_ACTIVATION_EXPIRED", first.decision_reasons)
+        self.assertEqual([], fixture["calls"])
+
+        manifest = fixture["manifest"]
+        fixture["runner"]._activations = StaticActivationRegistry(
+            [
+                ManifestActivation(
+                    organism_id=manifest["organism_id"],
+                    manifest_digest=manifest["manifest_digest"],
+                    subject=fixture["context"].subject,
+                    policy_version=manifest["policy_version"],
+                    expires_at="2026-08-27T22:30:00Z",
+                )
+            ]
+        )
+        fixture["runner"]._clock = lambda: after_expiry
+        second = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.COMPLETED, second.status)
+        self.assertEqual(2, second.model_calls)
+        self.assertEqual(1, len(fixture["executed"]))
+
+    def test_expiry_during_refreshed_revalidation_does_not_consume_run(self) -> None:
+        fixture = build_fixture()
+        runner = fixture["runner"]
+        base_registry = runner._activations
+        clock_state = {"now": NOW}
+        after_expiry = NOW + timedelta(minutes=46)
+
+        class AdvancingActivationRegistry:
+            def __init__(self) -> None:
+                self.active_until_calls = 0
+
+            def decision(self, **kwargs):
+                return base_registry.decision(**kwargs)
+
+            def active_until(self, **kwargs):
+                result = base_registry.active_until(**kwargs)
+                self.active_until_calls += 1
+                if self.active_until_calls == 2:
+                    clock_state["now"] = after_expiry
+                return result
+
+        runner._clock = lambda: clock_state["now"]
+        runner._activations = AdvancingActivationRegistry()  # type: ignore[assignment]
+
+        first = runner.run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.BLOCK, first.status)
+        self.assertIn("MANIFEST_ACTIVATION_EXPIRED", first.decision_reasons)
+        self.assertEqual([], fixture["calls"])
+
+        manifest = fixture["manifest"]
+        runner._activations = StaticActivationRegistry(
+            [
+                ManifestActivation(
+                    organism_id=manifest["organism_id"],
+                    manifest_digest=manifest["manifest_digest"],
+                    subject=fixture["context"].subject,
+                    policy_version=manifest["policy_version"],
+                    expires_at="2026-08-27T22:30:00Z",
+                )
+            ]
+        )
+        second = runner.run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.COMPLETED, second.status)
+        self.assertEqual(2, second.model_calls)
+        self.assertEqual(1, len(fixture["executed"]))
 
     def test_same_semantic_effect_from_changed_root_executes_only_once(self) -> None:
         fixture = build_fixture()
@@ -1262,14 +1641,88 @@ class OrganismTests(unittest.TestCase):
         self.assertEqual(1, len(first_fixture["executed"]))
         self.assertEqual([], second_fixture["executed"])
 
+    def test_ipv6_aliases_share_one_semantic_effect_key(self) -> None:
+        nonces = InMemoryNonceStore()
+        first_fixture = build_fixture(
+            network_capability=True,
+            network_destination="https://[0:0:0:0:0:0:0:1]:443",
+            target_prefixes=("https://[0:0:0:0:0:0:0:1]:443",),
+            analyst_output=_action_draft(
+                "cap.egress",
+                target="https://[0:0:0:0:0:0:0:1]:443/upload",
+            ),
+            nonce_store=nonces,
+        )
+        second_fixture = build_fixture(
+            network_capability=True,
+            network_destination="https://[::1]",
+            target_prefixes=("https://[::1]",),
+            analyst_output=_action_draft(
+                "cap.egress",
+                target="https://[::1]/upload",
+            ),
+            nonce_store=nonces,
+        )
+
+        first = first_fixture["runner"].run(
+            first_fixture["root"], first_fixture["context"]
+        )
+        second = second_fixture["runner"].run(
+            second_fixture["root"], second_fixture["context"]
+        )
+
+        self.assertEqual(OrganismStatus.COMPLETED, first.status)
+        self.assertEqual(OrganismStatus.BLOCK, second.status)
+        self.assertIsNotNone(second.action_run)
+        assert second.action_run is not None
+        self.assertIn("IDEMPOTENCY_REPLAYED", second.action_run.decision.reasons)
+        self.assertEqual(1, len(first_fixture["executed"]))
+        self.assertEqual([], second_fixture["executed"])
+
     def test_nested_organism_spawn_is_hard_blocked(self) -> None:
         fixture = build_fixture(spawn=True)
-        run = fixture["runner"].run(fixture["root"], fixture["context"])
+        first = fixture["runner"].run(fixture["root"], fixture["context"])
+        second = fixture["runner"].run(fixture["root"], fixture["context"])
 
-        self.assertEqual(OrganismStatus.BLOCK, run.status)
-        self.assertEqual(("NESTED_SPAWN_DENIED",), run.decision_reasons)
+        self.assertEqual(OrganismStatus.BLOCK, first.status)
+        self.assertEqual(("NESTED_SPAWN_DENIED",), first.decision_reasons)
+        self.assertEqual(OrganismStatus.BLOCK, second.status)
+        self.assertEqual(("NESTED_SPAWN_DENIED",), second.decision_reasons)
+        self.assertEqual(0, first.model_calls)
+        self.assertEqual(0, second.model_calls)
+        self.assertEqual([], fixture["calls"])
         self.assertEqual([], fixture["executed"])
-        self.assertIsNone(run.action_run)
+        self.assertIsNone(first.action_run)
+
+    def test_model_stages_cannot_declare_nested_spawn_authority(self) -> None:
+        cases = (
+            ("observer", "invocation_action", "create_organism"),
+            ("observer", "invocation_scope", "organism.spawn"),
+            ("analyst", "invocation_action", "create_organism"),
+            ("analyst", "invocation_scope", "organism.spawn"),
+        )
+        for stage, field, value in cases:
+            with self.subTest(stage=stage, field=field):
+                def mutate(
+                    manifest: dict[str, Any],
+                    *,
+                    selected_stage: str = stage,
+                    selected_field: str = field,
+                    selected_value: str = value,
+                ) -> None:
+                    manifest["pipeline"][selected_stage][selected_field] = (
+                        selected_value
+                    )
+
+                fixture = build_fixture(mutate_manifest=mutate)
+                run = fixture["runner"].run(
+                    fixture["root"], fixture["context"]
+                )
+
+                self.assertEqual(OrganismStatus.BLOCK, run.status)
+                self.assertIn("NESTED_SPAWN_DENIED", run.decision_reasons)
+                self.assertEqual([], fixture["calls"])
+                self.assertEqual([], fixture["executed"])
 
     def test_executor_error_is_effect_uncertain_not_success(self) -> None:
         fixture = build_fixture(executor_raises=True)
@@ -1296,6 +1749,78 @@ class OrganismTests(unittest.TestCase):
         self.assertEqual(OrganismStatus.BLOCK, run.status)
         self.assertIn("ADAPTER_PROVENANCE_DENIED", run.decision_reasons)
         self.assertEqual([], fixture["calls"])
+
+    def test_registry_key_must_match_the_current_adapter_identity_id(self) -> None:
+        observer_identity = _identity("observer", "openai")
+        analyst_identity = _identity("analyst", "anthropic")
+        observer_adapter = CallbackModelAdapter(
+            observer_identity,
+            lambda _call: ModelResult.returned(
+                observer_identity,
+                {"unused": True},
+                contains_secret=False,
+                data_classification="public",
+            ),
+        )
+        adapters = AdapterRegistry(
+            [
+                observer_adapter,
+                CallbackModelAdapter(
+                    analyst_identity,
+                    lambda _call: ModelResult.returned(
+                        analyst_identity,
+                        _no_action(),
+                        contains_secret=False,
+                        data_classification="public",
+                    ),
+                ),
+            ]
+        )
+        changed_identity = replace(
+            observer_identity,
+            adapter_id="adapter:observer:changed",
+        )
+        observer_adapter._identity = changed_identity
+        raw_manifest = _manifest(
+            observer_identity,
+            analyst_identity,
+            ["cap.record"],
+        )
+        raw_manifest.pop("manifest_digest")
+        raw_manifest["pipeline"]["observer"]["adapter_identity_digest"] = (
+            changed_identity.identity_digest
+        )
+        manifest = bind_organism_manifest(raw_manifest)
+        policy = OrganismPolicy(
+            policy_version="organism-policy-v1",
+            allowed_adapter_identity_digests=frozenset(
+                {changed_identity.identity_digest, analyst_identity.identity_digest}
+            ),
+            allowed_capability_ids=frozenset({"cap.record"}),
+        )
+        activations = StaticActivationRegistry(
+            [
+                ManifestActivation(
+                    organism_id=manifest["organism_id"],
+                    manifest_digest=manifest["manifest_digest"],
+                    subject="user:alice",
+                    policy_version=manifest["policy_version"],
+                    expires_at="2026-08-27T21:45:00Z",
+                )
+            ]
+        )
+
+        decision = evaluate_organism_manifest(
+            manifest,
+            policy,
+            adapters,
+            activations,
+            subject="user:alice",
+            now=NOW,
+        )
+
+        self.assertEqual(DecisionStatus.BLOCK, decision.status)
+        self.assertIn("ADAPTER_PROVENANCE_DENIED", decision.reasons)
 
     def test_topology_change_is_not_an_organism_v01_manifest(self) -> None:
         def mutate(manifest: dict[str, Any]) -> None:
@@ -1392,6 +1917,114 @@ class OrganismTests(unittest.TestCase):
 
         self.assertEqual(OrganismStatus.COMPLETED, run.status)
 
+    def test_target_state_digest_is_resolved_for_the_compiled_target(self) -> None:
+        first_fixture = build_fixture(
+            target_prefixes=("resource:tenant-a",),
+            analyst_output=_action_draft(target="resource:tenant-a/item-1"),
+        )
+        second_fixture = build_fixture(
+            target_prefixes=("resource:tenant-a",),
+            analyst_output=_action_draft(target="resource:tenant-a/item-2"),
+        )
+
+        first = first_fixture["runner"].run(
+            first_fixture["root"], first_fixture["context"]
+        )
+        second = second_fixture["runner"].run(
+            second_fixture["root"], second_fixture["context"]
+        )
+
+        self.assertEqual(OrganismStatus.COMPLETED, first.status)
+        self.assertEqual(OrganismStatus.COMPLETED, second.status)
+        first_proposal = first_fixture["executed"][0]
+        second_proposal = second_fixture["executed"][0]
+        self.assertNotEqual(
+            first_proposal["target_state_digest"],
+            second_proposal["target_state_digest"],
+        )
+        for proposal in (first_proposal, second_proposal):
+            self.assertEqual(
+                digest_json(
+                    {
+                        "target": proposal["target"],
+                        "synthetic_state": {"revision": "fixture-v1"},
+                    }
+                ),
+                proposal["target_state_digest"],
+            )
+
+    def test_invalid_target_state_resolution_fails_closed(self) -> None:
+        fixture = build_fixture()
+        factory = StaticProposalFactory(
+            invocation_policy_version="invocation-policy-v1",
+            action_policy_version="action-policy-v1",
+            capabilities=[
+                replace(
+                    _capability(),
+                    target_state_resolver=lambda _target, _arguments: "invalid",
+                )
+            ],
+        )
+
+        with self.assertRaisesRegex(
+            ProposalCompilationError,
+            "TARGET_STATE_RESOLUTION_FAILED",
+        ):
+            factory.action_from_draft(
+                draft=_action_draft(),
+                manifest=fixture["manifest"],
+                context=fixture["context"],
+                run_id="run:target-state",
+                trace_id="trace:target-state",
+                parent_span_id="span:analyst",
+                parent_request_id="request:analyst",
+                upstream_result_id="model-result:analyst",
+                upstream_result_digest="sha256:" + "a" * 64,
+            )
+
+    def test_target_state_resolver_exception_is_an_infrastructure_failure(self) -> None:
+        fixture = build_fixture()
+
+        def fail_resolution(_target: str, _arguments: dict[str, Any]) -> str:
+            raise RuntimeError("synthetic state backend failure")
+
+        fixture["runner"]._proposal_factory = StaticProposalFactory(
+            invocation_policy_version="invocation-policy-v1",
+            action_policy_version="action-policy-v1",
+            capabilities=[
+                replace(
+                    _capability(),
+                    target_state_resolver=fail_resolution,
+                )
+            ],
+        )
+
+        with self.assertRaisesRegex(
+            ProposalInfrastructureError,
+            "TARGET_STATE_RESOLUTION_FAILED",
+        ):
+            fixture["runner"]._proposal_factory.action_from_draft(
+                draft=_action_draft(),
+                manifest=fixture["manifest"],
+                context=fixture["context"],
+                run_id="run:target-state-infrastructure",
+                trace_id="trace:target-state-infrastructure",
+                parent_span_id="span:analyst",
+                parent_request_id="request:analyst",
+                upstream_result_id="model-result:analyst",
+                upstream_result_digest="sha256:" + "a" * 64,
+            )
+
+        run = fixture["runner"].run(fixture["root"], fixture["context"])
+
+        self.assertEqual(OrganismStatus.FAILED, run.status)
+        self.assertEqual(
+            ("TARGET_STATE_RESOLUTION_FAILED",),
+            run.decision_reasons,
+        )
+        self.assertEqual(2, run.model_calls)
+        self.assertEqual([], fixture["executed"])
+
     def test_target_validator_rejects_normalization_traversal(self) -> None:
         fixture = build_fixture(
             target_prefixes=("resource:tenant-a",),
@@ -1436,11 +2069,33 @@ class OrganismTests(unittest.TestCase):
         )
         self.assertEqual([], fixture["executed"])
 
+    def test_network_prefix_must_be_compatible_with_static_destination(self) -> None:
+        for scope in ("network.egress", "external.egress"):
+            with self.subTest(scope=scope):
+                capability = replace(
+                    _capability(
+                        network=True,
+                        target_prefixes=(
+                            "https://different-sink.example.test/api",
+                        ),
+                    ),
+                    scope=scope,
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "invalid or approval-requiring capability",
+                ):
+                    StaticProposalFactory(
+                        invocation_policy_version="invocation-policy-v1",
+                        action_policy_version="action-policy-v1",
+                        capabilities=[capability],
+                    )
+
     def test_same_origin_network_url_target_is_canonical_and_accepted(self) -> None:
         fixture = build_fixture(
             network_capability=True,
             network_destination="https://PUBLIC-SINK.EXAMPLE.TEST:443",
-            target_prefixes=("https://PUBLIC-SINK.EXAMPLE.TEST:443",),
+            target_prefixes=("https://public-sink.example.test",),
             analyst_output=_action_draft(
                 "cap.egress",
                 target="https://PUBLIC-SINK.EXAMPLE.TEST:443/upload",
@@ -1878,6 +2533,29 @@ class OrganismTests(unittest.TestCase):
                 "executor"
             ]["properties"]["allowed_capability_ids"]["uniqueItems"]
         )
+        fixture = build_fixture()
+        self.assertTrue(
+            _matches_json_schema(
+                fixture["manifest"],
+                manifest_schema,
+                manifest_schema,
+            )
+        )
+        for stage in ("observer", "analyst"):
+            for field, value in (
+                ("invocation_action", "create_organism"),
+                ("invocation_scope", "organism.spawn"),
+            ):
+                with self.subTest(stage=stage, field=field):
+                    recursive = copy.deepcopy(fixture["manifest"])
+                    recursive["pipeline"][stage][field] = value
+                    self.assertFalse(
+                        _matches_json_schema(
+                            recursive,
+                            manifest_schema,
+                            manifest_schema,
+                        )
+                    )
         context_variants = proposal_schema["properties"]["untrusted_context"][
             "items"
         ]["oneOf"]
