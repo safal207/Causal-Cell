@@ -269,6 +269,28 @@ class GuardTests(unittest.TestCase):
             ).reasons,
         )
 
+        oversized_budget = copy.deepcopy(base_proposal()["resource_budget"])
+        oversized_budget["max_cost"] = 1 << 4096
+        self.assertIn(
+            "MALFORMED_PROPOSAL",
+            evaluate_proposal(
+                rebound(base_proposal(), resource_budget=oversized_budget),
+                base_policy(),
+                now=NOW,
+            ).reasons,
+        )
+
+        oversized_policy = base_policy()
+        oversized_policy["max_resource_budget"]["max_cost"] = 1 << 4096
+        self.assertIn(
+            "POLICY_INVALID",
+            evaluate_proposal(
+                base_proposal(),
+                oversized_policy,
+                now=NOW,
+            ).reasons,
+        )
+
     def test_approval_expiry_and_binding(self) -> None:
         proposal, policy = approved_irreversible()
         expired = copy.deepcopy(policy)
@@ -366,6 +388,21 @@ class RuntimeEvidenceTests(unittest.TestCase):
             self.assertEqual(run.continuity["requests"], [])
             self.assertEqual(run.continuity["outcomes"], [])
             self.assertTrue(run.verification.valid)
+
+            oversized_budget = copy.deepcopy(base_proposal()["resource_budget"])
+            oversized_budget["max_cost"] = 1 << 4096
+            oversized = rebound(
+                base_proposal(),
+                attempt_id="attempt-oversized-cost",
+                nonce="nonce-oversized-cost",
+                idempotency_key="oversized-cost",
+                resource_budget=oversized_budget,
+            )
+            oversized_run = self._cell(root).execute(oversized, executor)
+            self.assertEqual(DecisionStatus.BLOCK, oversized_run.decision.status)
+            self.assertIn("MALFORMED_PROPOSAL", oversized_run.decision.reasons)
+            self.assertFalse(oversized_run.observation["executor_invoked"])
+            self.assertTrue(oversized_run.verification.valid)
             self.assertEqual(calls, 0)
 
     def test_nonce_idempotency_and_race(self) -> None:
@@ -450,6 +487,33 @@ class RuntimeEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "timezone-aware"):
                 cell.execute(base_proposal(), executor)
             self.assertEqual(0, calls)
+
+        class SequencedClock:
+            def __init__(self) -> None:
+                self.values = iter((NOW, NOW, NOW.replace(tzinfo=None)))
+                self.calls = 0
+
+            def __call__(self):
+                self.calls += 1
+                return next(self.values)
+
+        with tempfile.TemporaryDirectory() as root:
+            calls = 0
+            clock = SequencedClock()
+
+            def executor(_: dict[str, object]) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return {"ok": True}
+
+            run = CausalCell(base_policy(), root, clock=clock).execute(
+                base_proposal(), executor
+            )
+
+            self.assertEqual(DecisionStatus.ACCEPT, run.decision.status)
+            self.assertEqual(1, calls)
+            self.assertEqual(2, clock.calls)
+            self.assertEqual("2026-08-27T21:00:00Z", run.observation["captured_at"])
 
     def test_executor_failure_and_path_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as root:

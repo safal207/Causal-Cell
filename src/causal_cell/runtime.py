@@ -94,16 +94,18 @@ class CausalCell:
         exact_proposal = copy.deepcopy(dict(proposal))
         now = require_aware_utc(self._clock())
         decision = evaluate_proposal(exact_proposal, self._policy, now=now)
+        evidence_time = now
         nonce_consumed = False
         executor_invoked = False
         result_digest: str | None = None
         error_type: str | None = None
 
         if decision.status is DecisionStatus.ACCEPT:
+            evidence_time = require_aware_utc(self._clock())
             decision = evaluate_proposal(
                 exact_proposal,
                 self._policy,
-                now=require_aware_utc(self._clock()),
+                now=evidence_time,
             )
         if decision.status is DecisionStatus.ACCEPT:
             replay_reason = self._nonces.consume(
@@ -126,7 +128,7 @@ class CausalCell:
         if decision.status is not DecisionStatus.ACCEPT:
             observation_status = "NOT_INVOKED"
 
-        captured_at = format_timestamp(require_aware_utc(self._clock()))
+        captured_at = format_timestamp(evidence_time)
         observation_id = (
             f"obs:{exact_proposal.get('trace_id', 'unknown')}:"
             f"{exact_proposal.get('attempt_id', 'unknown')}"

@@ -106,6 +106,15 @@ def _nonempty(value: Any) -> bool:
     return bool(value.strip()) and value == value.strip()
 
 
+def _valid_cost(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
 def _unique(values: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
 
@@ -265,12 +274,7 @@ def _structural_reasons(proposal: Mapping[str, Any]) -> list[str]:
         ):
             reasons.append("MALFORMED_PROPOSAL")
         cost = budget.get("max_cost")
-        if (
-            isinstance(cost, bool)
-            or not isinstance(cost, (int, float))
-            or not math.isfinite(cost)
-            or cost < 0
-        ):
+        if not _valid_cost(cost):
             reasons.append("MALFORMED_PROPOSAL")
     metadata = proposal.get("metadata", {})
     if not isinstance(metadata, Mapping):
@@ -431,12 +435,7 @@ def _policy_valid_unchecked(policy: Mapping[str, Any]) -> bool:
     ):
         return False
     cost = budget.get("max_cost")
-    if (
-        isinstance(cost, bool)
-        or not isinstance(cost, (int, float))
-        or not math.isfinite(cost)
-        or cost < 0
-    ):
+    if not _valid_cost(cost):
         return False
     approvals = policy.get("approvals")
     if type(approvals) is not dict or any(
