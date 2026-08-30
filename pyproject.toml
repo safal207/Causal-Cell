@@ -22,6 +22,7 @@ dependencies = []
 
 [project.scripts]
 causal-cell = "causal_cell.cli:main"
+causal-cell-pilot = "causal_cell.repository_pilot:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

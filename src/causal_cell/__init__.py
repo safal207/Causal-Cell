@@ -16,6 +16,7 @@ from .evidence import EvidenceVerification, verify_bundle
 from .guard import evaluate_proposal
 from .models import CellRun, Decision, DecisionStatus
 from .normalize import normalize_proposal
+from .ollama import OLLAMA_ADAPTER_SCHEMA_DIGEST, OllamaModelAdapter
 from .organism import (
     ACTION_DRAFT_PROFILE,
     MANIFEST_PROFILE,
@@ -26,6 +27,7 @@ from .organism import (
     OrganismRun,
     OrganismRunner,
     OrganismStatus,
+    OrganismStore,
     PreparedAction,
     ProposalCompilationError,
     ProposalInfrastructureError,
@@ -38,7 +40,8 @@ from .organism import (
     organism_manifest_digest,
     validate_action_draft,
 )
-from .runtime import CausalCell, InMemoryNonceStore
+from .runtime import CausalCell, InMemoryNonceStore, NonceStore
+from .sqlite_store import SQLiteReplayStore
 
 __all__ = [
     "ACTION_DRAFT_PROFILE",
@@ -58,15 +61,20 @@ __all__ = [
     "ModelCall",
     "ModelResult",
     "ModelResultStatus",
+    "OLLAMA_ADAPTER_SCHEMA_DIGEST",
+    "OllamaModelAdapter",
     "OrganismDecision",
     "OrganismPolicy",
     "OrganismRun",
+    "OrganismStore",
     "OrganismRunner",
     "OrganismStatus",
     "PreparedAction",
     "ProposalCompilationError",
     "ProposalInfrastructureError",
     "RunContext",
+    "NonceStore",
+    "SQLiteReplayStore",
     "StaticActivationRegistry",
     "StaticCapability",
     "StaticProposalFactory",

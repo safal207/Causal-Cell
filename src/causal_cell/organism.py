@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from .adapters import (
@@ -42,9 +42,13 @@ from .canonical import (
     require_aware_utc,
     snapshot_json,
 )
-from .guard import normalize_https_origin, validate_policy_document
+from .guard import (
+    normalize_egress_origin,
+    normalize_https_origin,
+    validate_policy_document,
+)
 from .models import CellRun, DecisionStatus
-from .runtime import CausalCell, InMemoryNonceStore
+from .runtime import CausalCell, InMemoryNonceStore, NonceStore
 
 MANIFEST_PROFILE = "org.causalcell.organism-manifest.v0.1"
 ACTION_DRAFT_PROFILE = "org.causalcell.action-draft.v0.1"
@@ -349,6 +353,10 @@ class InMemoryOrganismStore:
             return True
 
 
+class OrganismStore(Protocol):
+    def consume_run(self, semantic_run_key: str) -> bool: ...
+
+
 def organism_manifest_digest(manifest: Mapping[str, Any]) -> str:
     digestible = snapshot_json(manifest)
     if not isinstance(digestible, dict):
@@ -507,11 +515,11 @@ def _policy_statically_allows(
     ]
     if not scope_is_network:
         return destination is None
-    canonical_destination = normalize_https_origin(destination)
+    canonical_destination = normalize_egress_origin(destination, scope)
     allowed_destinations = {
         normalized
         for item in policy["allowed_destinations"]
-        if (normalized := normalize_https_origin(item)) is not None
+        if (normalized := normalize_egress_origin(item, scope)) is not None
     }
     if (
         canonical_destination is None
@@ -528,7 +536,7 @@ def _policy_statically_allows(
     secret_destinations = {
         normalized
         for item in policy["allowed_secret_destinations"]
-        if (normalized := normalize_https_origin(item)) is not None
+        if (normalized := normalize_egress_origin(item, scope)) is not None
     }
     return canonical_destination in secret_destinations
 
@@ -1262,8 +1270,8 @@ class OrganismRunner:
         executors: Mapping[str, Executor],
         evidence_root: str | Path,
         clock: Callable[[], datetime] | None = None,
-        nonce_store: InMemoryNonceStore | None = None,
-        organism_store: InMemoryOrganismStore | None = None,
+        nonce_store: NonceStore | None = None,
+        organism_store: OrganismStore | None = None,
     ) -> None:
         if type(organism_policy) is not OrganismPolicy:
             raise ValueError("organism_policy must be an exact OrganismPolicy")

@@ -39,3 +39,19 @@ jobs:
         run: python examples/smart_contract_release.py --evidence-root "${{ runner.temp }}/causal-cell-evidence"
       - name: Offline mixed-provider organism
         run: python examples/multi_model_organism.py
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Build pilot image
+        run: docker build --tag causal-cell-pilot:test .
+      - name: Smoke-test non-root read-only entry point
+        run: >-
+          docker run --rm --read-only --cap-drop ALL
+          --security-opt no-new-privileges causal-cell-pilot:test --help

@@ -71,11 +71,12 @@ with canonical bytes in private fields. Consumers must use `payload`, `output`,
 and `to_record()`; `dataclasses.replace()`, `asdict()`, and field reflection are
 not supported transport APIs.
 
-The repository ships only `CallbackModelAdapter`, a reference wrapper with no
-provider SDK or transport of its own. Its application-supplied callback may
-still perform I/O; the bundled example callbacks are fully offline. A production
-OpenAI, Anthropic, Gemini, local-model, or other connector belongs in the
-embedding application and must preserve the same contract. It must disable
+The core v0.1 contract includes `CallbackModelAdapter`, a reference wrapper with
+no provider SDK or transport of its own. Its application-supplied callback may
+still perform I/O; the bundled example callbacks are fully offline. v0.2 also
+ships a narrow `OllamaModelAdapter` for the loopback-only repository pilot.
+A production remote-provider connector belongs in the embedding application and
+must preserve the same contract. It must disable
 provider-side tools, functions, and automatic agent handoffs, or route every such
 effect back through its own guarded `CausalCell`; otherwise an SDK can bypass the
 `ActionDraft` boundary. Redirects must be disabled or every hop must be checked
@@ -296,7 +297,7 @@ Organism v0.1 is a reference kernel, not a production isolation boundary:
 - adapters and executors are synchronous, in-process callbacks; an over-deadline
   callback cannot be preempted, though downstream dispatch is blocked;
 - default replay, nonce, and semantic-run stores are in-memory and per runner;
-  cross-runner protection requires explicitly shared stores;
+  v0.2 also ships an explicitly injected, single-filesystem SQLite store;
 - provider identity, usage, and result labels are adapter-reported, not
   independently attested;
 - model output content is not independently classified; callers must label
@@ -309,7 +310,8 @@ Organism v0.1 is a reference kernel, not a production isolation boundary:
 - provider-side tools/functions/handoffs must be disabled or separately guarded,
   and every outbound redirect hop must be reauthorized;
 - budgets are per run and not durable distributed reservations;
-- no real provider SDK, credential store, sandbox, or network transport ships;
+- the v0.2 Ollama pilot includes a zero-key loopback HTTP transport, but no
+  remote-provider SDK, credential store, or general sandbox ships;
 - executor callback return/error does not independently prove an external effect;
 - no approval-required organism actions or plan/resume flow;
 - no recursive organisms, dynamic topology, retries, or parallel fan-out;
