@@ -29,8 +29,8 @@ proposal ≠ authorization ≠ execution ≠ observation ≠ verification
 - `HOLD` waits for bound approval or revalidation and does not dispatch.
 - `BLOCK` rejects malformed, expired, replayed, out-of-scope, action/scope-
   confused, or denied work and does not dispatch.
-- A process-local atomic store consumes both `nonce` and `idempotency_key`
-  before the executor callback.
+- An atomic store consumes both `nonce` and `idempotency_key` before the
+  executor callback; v0.2 includes both in-memory and durable SQLite stores.
 - Every attempt receives a unique evidence directory; a replay cannot overwrite
   the original attempt.
 
@@ -69,6 +69,23 @@ alternate endpoints.
 See [Organism v0.1](docs/ORGANISM_V0_1.md), its
 [threat model](docs/ORGANISM_THREAT_MODEL.md), and the
 [offline mixed-provider example](examples/multi_model_organism.py).
+
+## Free local Ollama pilot
+
+The v0.2 pilot uses `qwen3:4b` through local Ollama, requires no API key, mounts
+the repository read-only, and keeps replay state/evidence in a Docker volume:
+
+```bash
+docker compose up -d ollama
+docker compose run --rm model-init
+docker compose build pilot
+docker compose run --rm --no-deps pilot
+docker compose stop ollama
+```
+
+See the [durable Ollama pilot guide](docs/DURABLE_OLLAMA_PILOT.md) for the
+free-provider comparison, first-run model download, containment rules, and
+honest limits.
 
 ## Quick start
 
@@ -148,7 +165,8 @@ detection claims.
 Version `v0.2` does **not** provide:
 
 - an OS/container/VM sandbox — adapter and executor callbacks are in-process;
-- persistent or distributed nonce, semantic-run, or budget transactions;
+- distributed nonce, semantic-run, or budget transactions (SQLite persistence
+  is single-filesystem only);
 - cryptographic approval signatures, key management, or provider attestation;
 - independent truth verification of a model or executor response;
 - blockchain finality, evidence authenticity, or complete history;

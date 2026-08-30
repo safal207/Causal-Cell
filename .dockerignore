@@ -1,0 +1,10 @@
+.git
+.github
+.causal-cell
+__pycache__
+*.py[cod]
+*.sqlite3
+*.bundle
+*.egg-info
+dist
+build

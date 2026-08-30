@@ -19,7 +19,11 @@ from causal_cell import (
     verify_bundle,
 )
 from causal_cell.evidence import load_json_strict
-from causal_cell.guard import REQUIRED_FIELDS, normalize_https_origin
+from causal_cell.guard import (
+    REQUIRED_FIELDS,
+    normalize_https_origin,
+    normalize_local_model_origin,
+)
 from tests.helpers import NOW, approved_irreversible, base_policy, base_proposal, rebound
 
 
@@ -41,6 +45,58 @@ class GuardTests(unittest.TestCase):
         )
         self.assertIsNone(normalize_https_origin("https://[fe80::1%25eth0]/"))
         self.assertIsNone(normalize_https_origin("https://."))
+
+    def test_local_model_http_is_limited_to_literal_loopback(self) -> None:
+        self.assertEqual(
+            "http://127.0.0.1:11434",
+            normalize_local_model_origin("http://127.0.0.1:11434/api/chat"),
+        )
+        self.assertEqual(
+            "http://[::1]:11434",
+            normalize_local_model_origin("http://[0:0:0:0:0:0:0:1]:11434"),
+        )
+        for denied in (
+            "http://localhost:11434",
+            "http://127.0.0.1.example.test:11434",
+            "http://10.0.0.2:11434",
+            "http://user@127.0.0.1:11434",
+            "http://[fe80::1%25eth0]:11434",
+        ):
+            with self.subTest(denied=denied):
+                self.assertIsNone(normalize_local_model_origin(denied))
+
+    def test_local_model_scope_allows_only_exact_loopback_http(self) -> None:
+        policy = base_policy()
+        policy["allowed_actions"].append("invoke_local_model")
+        policy["allowed_scopes"].append("network.local_model")
+        policy["network_scopes"].append("network.local_model")
+        policy["allowed_action_scopes"]["invoke_local_model"] = [
+            "network.local_model"
+        ]
+        policy["allowed_destinations"].append("http://127.0.0.1:11434")
+        local = rebound(
+            base_proposal(),
+            action="invoke_local_model",
+            scope="network.local_model",
+            destination="http://127.0.0.1:11434/api/chat",
+        )
+        self.assertEqual(
+            DecisionStatus.ACCEPT,
+            evaluate_proposal(local, policy, now=NOW).status,
+        )
+        for denied in (
+            "http://localhost:11434",
+            "http://10.0.0.2:11434",
+            "http://127.0.0.2:11434",
+        ):
+            with self.subTest(denied=denied):
+                decision = evaluate_proposal(
+                    rebound(local, destination=denied),
+                    policy,
+                    now=NOW,
+                )
+                self.assertEqual(DecisionStatus.BLOCK, decision.status)
+                self.assertIn("DESTINATION_DENIED", decision.reasons)
 
     def test_safe_and_approval_paths(self) -> None:
         self.assertEqual(
@@ -454,6 +510,48 @@ class RuntimeEvidenceTests(unittest.TestCase):
             self.assertEqual(DecisionStatus.BLOCK, second.decision.status)
             self.assertIn("INTENT_REPLAYED", second.decision.reasons)
             self.assertEqual(1, calls)
+
+    def test_noncompliant_nonce_store_cannot_bypass_claim_validation(self) -> None:
+        class NoncompliantStore:
+            def __init__(self, outcome: str | None) -> None:
+                self.outcome = outcome
+
+            def consume(
+                self,
+                _nonce: str,
+                _idempotency_key: str,
+                _bound_proposal_digest: str,
+                *,
+                validate,
+            ) -> str | None:
+                return self.outcome
+
+        for outcome, reason in (
+            ("AUTHORIZATION_INVALIDATED", "NONCE_STORE_VALIDATION_INVALID"),
+            (None, "NONCE_STORE_VALIDATION_SKIPPED"),
+        ):
+            with self.subTest(outcome=outcome):
+                with tempfile.TemporaryDirectory() as root:
+                    calls = 0
+
+                    def executor(_proposal):
+                        nonlocal calls
+                        calls += 1
+                        return {"unexpected": True}
+
+                    run = CausalCell(
+                        base_policy(),
+                        root,
+                        nonce_store=NoncompliantStore(outcome),
+                        clock=lambda: NOW,
+                    ).execute(base_proposal(), executor)
+
+                    self.assertEqual(DecisionStatus.BLOCK, run.decision.status)
+                    self.assertIn(reason, run.decision.reasons)
+                    self.assertFalse(run.observation["executor_invoked"])
+                    self.assertFalse(run.observation["nonce_consumed"])
+                    self.assertEqual(0, calls)
+                    self.assertTrue(run.verification.valid)
 
     def test_clock_preserves_falsey_callable_and_rejects_naive_time(self) -> None:
         class FalseyClock:

@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .canonical import digest_json, format_timestamp, require_aware_utc
 from .evidence import write_bundle
@@ -17,6 +17,24 @@ from .models import CellRun, Decision, DecisionStatus
 
 Executor = Callable[[Mapping[str, Any]], Any]
 Clock = Callable[[], datetime]
+ClaimValidator = Callable[[], str | None]
+
+_AUTHORIZATION_INVALIDATED = "AUTHORIZATION_INVALIDATED"
+
+
+class NonceStore(Protocol):
+    def consume(
+        self,
+        nonce: str,
+        idempotency_key: str,
+        bound_proposal_digest: str,
+        *,
+        validate: ClaimValidator,
+    ) -> str | None: ...
+
+    def consumed_by(self, nonce: str) -> str | None: ...
+
+    def idempotency_consumed_by(self, idempotency_key: str) -> str | None: ...
 
 
 class InMemoryNonceStore:
@@ -31,13 +49,21 @@ class InMemoryNonceStore:
         self._idempotency: dict[str, str] = {}
 
     def consume(
-        self, nonce: str, idempotency_key: str, bound_proposal_digest: str
+        self,
+        nonce: str,
+        idempotency_key: str,
+        bound_proposal_digest: str,
+        *,
+        validate: ClaimValidator,
     ) -> str | None:
         with self._lock:
             if nonce in self._consumed:
                 return "INTENT_REPLAYED"
             if idempotency_key in self._idempotency:
                 return "IDEMPOTENCY_REPLAYED"
+            validation_reason = validate()
+            if validation_reason is not None:
+                return validation_reason
             self._consumed[nonce] = bound_proposal_digest
             self._idempotency[idempotency_key] = bound_proposal_digest
             return None
@@ -74,7 +100,7 @@ class CausalCell:
         policy: Mapping[str, Any],
         evidence_root: str | Path,
         *,
-        nonce_store: InMemoryNonceStore | None = None,
+        nonce_store: NonceStore | None = None,
         clock: Clock | None = None,
     ) -> None:
         self._policy = copy.deepcopy(dict(policy))
@@ -101,22 +127,55 @@ class CausalCell:
         error_type: str | None = None
 
         if decision.status is DecisionStatus.ACCEPT:
-            evidence_time = require_aware_utc(self._clock())
-            decision = evaluate_proposal(
-                exact_proposal,
-                self._policy,
-                now=evidence_time,
-            )
-        if decision.status is DecisionStatus.ACCEPT:
+            claim_decision = decision
+            claim_validation_invoked = False
+
+            def validate_claim() -> str | None:
+                nonlocal claim_decision, claim_validation_invoked, evidence_time
+                claim_validation_invoked = True
+                evidence_time = require_aware_utc(self._clock())
+                claim_decision = evaluate_proposal(
+                    exact_proposal,
+                    self._policy,
+                    now=evidence_time,
+                )
+                if claim_decision.status is DecisionStatus.ACCEPT:
+                    return None
+                return _AUTHORIZATION_INVALIDATED
+
             replay_reason = self._nonces.consume(
                 exact_proposal["nonce"],
                 exact_proposal["idempotency_key"],
                 exact_proposal["proposal_digest"],
+                validate=validate_claim,
             )
-            nonce_consumed = replay_reason is None
-            if replay_reason is not None:
+            nonce_consumed = (
+                replay_reason is None
+                and claim_validation_invoked
+                and claim_decision.status is DecisionStatus.ACCEPT
+            )
+            if replay_reason == _AUTHORIZATION_INVALIDATED:
+                if (
+                    claim_validation_invoked
+                    and claim_decision.status is not DecisionStatus.ACCEPT
+                ):
+                    decision = claim_decision
+                else:
+                    decision = _replay_block(
+                        decision,
+                        "NONCE_STORE_VALIDATION_INVALID",
+                    )
+            elif replay_reason is not None:
                 decision = _replay_block(decision, replay_reason)
+            elif not claim_validation_invoked:
+                decision = _replay_block(
+                    decision,
+                    "NONCE_STORE_VALIDATION_SKIPPED",
+                )
+            elif claim_decision.status is not DecisionStatus.ACCEPT:
+                decision = claim_decision
             else:
+                decision = claim_decision
                 executor_invoked = True
                 try:
                     result = executor(copy.deepcopy(exact_proposal))

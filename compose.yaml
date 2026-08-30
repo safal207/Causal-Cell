@@ -1,0 +1,60 @@
+services:
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama@sha256:24d41d792306fc3221de215bb6f225faf981712d1f38083d8c61301dfa2b69b3}
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  model-init:
+    profiles: ["init", "pilot"]
+    image: ${OLLAMA_IMAGE:-ollama/ollama@sha256:24d41d792306fc3221de215bb6f225faf981712d1f38083d8c61301dfa2b69b3}
+    network_mode: service:ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama-models:/root/.ollama
+    entrypoint: ["/bin/ollama"]
+    command: ["pull", "${OLLAMA_MODEL:-qwen3:4b}"]
+    restart: "no"
+
+  pilot:
+    profiles: ["pilot"]
+    build:
+      context: .
+    network_mode: service:ollama
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - .:/workspace:ro
+      - causal-cell-state:/state
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    command:
+      - --repository
+      - /workspace
+      - --model
+      - ${OLLAMA_MODEL:-qwen3:4b}
+      - --ollama-base-url
+      - http://127.0.0.1:11434
+      - --state-database
+      - /state/causal-cell.sqlite3
+      - --evidence-root
+      - /state/evidence
+      - --report-root
+      - /state/reports
+    restart: "no"
+
+volumes:
+  ollama-models:
+  causal-cell-state:

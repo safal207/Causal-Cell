@@ -173,6 +173,54 @@ def normalize_https_origin(value: Any) -> str | None:
     return f"https://{authority}"
 
 
+def normalize_local_model_origin(value: Any) -> str | None:
+    """Return an HTTP origin only when it is a literal loopback endpoint.
+
+    Local model servers such as Ollama commonly expose an HTTP-only API.  This
+    deliberately excludes hostnames (including ``localhost``), private-network
+    addresses, userinfo, and scoped IPv6 literals so the exception cannot turn
+    into a general clear-text egress path.
+    """
+
+    if type(value) is not str or not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "http" or not parsed.hostname:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    host = parsed.hostname.lower().rstrip(".")
+    if not host or "%" in host:
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if not address.is_loopback:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    rendered_host = f"[{address.compressed.lower()}]" if address.version == 6 else str(address)
+    authority = rendered_host if port in (None, 80) else f"{rendered_host}:{port}"
+    return f"http://{authority}"
+
+
+def normalize_egress_origin(value: Any, scope: Any) -> str | None:
+    """Canonicalize a destination under the transport rules for its scope."""
+
+    https_origin = normalize_https_origin(value)
+    if https_origin is not None:
+        return https_origin
+    if scope == "network.local_model":
+        return normalize_local_model_origin(value)
+    return None
+
+
 def _untrusted_findings(proposal: Mapping[str, Any]) -> list[str]:
     findings: list[str] = []
     context = proposal.get("untrusted_context", [])
@@ -570,18 +618,19 @@ def evaluate_proposal(
     scope_is_network = proposal["scope"].startswith("network.") or proposal["scope"] in policy[
         "network_scopes"
     ]
-    destination = normalize_https_origin(proposal["destination"])
+    destination = normalize_egress_origin(proposal["destination"], proposal["scope"])
     allowed_destinations = {
         value
         for value in (
-            normalize_https_origin(item) for item in policy["allowed_destinations"]
+            normalize_egress_origin(item, proposal["scope"])
+            for item in policy["allowed_destinations"]
         )
         if value is not None
     }
     secret_destinations = {
         value
         for value in (
-            normalize_https_origin(item)
+            normalize_egress_origin(item, proposal["scope"])
             for item in policy["allowed_secret_destinations"]
         )
         if value is not None
