@@ -69,7 +69,10 @@ two Compose commands without the leading assignment.
   for Ollama model downloads and is not an OS firewall;
 - repository files are bounded, digest-labeled untrusted data; excluded trees,
   symlinks, exact common credential filenames, and `.env.*` files are skipped;
-  excerpts are included only for an allowlist of text-oriented suffixes;
+  excerpts are included only for an allowlist of text-oriented suffixes. The
+  default model-facing snapshot is capped at 32 files, 1,000 excerpt bytes per
+  file, and 3,000 excerpt bytes total so it stays practical within Ollama's
+  default 4,096-token context on CPU-only hosts;
 - model tools, streaming, redirects, credentials, environment proxies, and
   model-side retries are not enabled;
 - the analyst can select only `cap.record_repository_observation` or `NO_ACTION`;

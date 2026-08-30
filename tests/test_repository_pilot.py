@@ -12,6 +12,7 @@ from causal_cell.canonical import format_timestamp
 from causal_cell.repository_pilot import (
     ACTION_DRAFT_PROFILE,
     PILOT_CAPABILITY_ID,
+    PILOT_MAX_FILES,
     PILOT_MAX_TOTAL_EXCERPT_BYTES,
     PILOT_SUBJECT,
     PILOT_TARGET,
@@ -138,6 +139,17 @@ class RepositoryPilotTests(unittest.TestCase):
                 for item in snapshot["files"]
             )
             self.assertEqual(PILOT_MAX_TOTAL_EXCERPT_BYTES, excerpt_bytes)
+
+    def test_default_snapshot_file_budget_is_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for index in range(PILOT_MAX_FILES + 1):
+                (root / f"module-{index:02d}.py").write_text("pass", encoding="utf-8")
+
+            snapshot = collect_repository_snapshot(root)
+
+            self.assertEqual(PILOT_MAX_FILES, snapshot["file_count_observed"])
+            self.assertTrue(snapshot["files_truncated"])
 
     def test_fake_local_models_complete_once_and_write_verified_report(self) -> None:
         observer_output = {
