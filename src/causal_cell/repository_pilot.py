@@ -33,7 +33,9 @@ PILOT_ORGANISM_ID = "organism:local-repository-pilot"
 PILOT_SUBJECT = "user:local-operator"
 PILOT_CAPABILITY_ID = "cap.record_repository_observation"
 PILOT_TARGET = "report:repository/pilot"
-PILOT_MAX_TOTAL_EXCERPT_BYTES = 12_000
+PILOT_MAX_FILES = 32
+PILOT_MAX_EXCERPT_BYTES_PER_FILE = 1_000
+PILOT_MAX_TOTAL_EXCERPT_BYTES = 3_000
 PILOT_MAX_TOTAL_TOKENS = 32_768
 PILOT_MAX_SCAN_DIRECTORIES = 1_000
 PILOT_MAX_SCAN_ENTRIES = 10_000
@@ -232,8 +234,8 @@ def _bounded_positive_int(name: str, value: int, maximum: int) -> int:
 def collect_repository_snapshot(
     repository: str | Path,
     *,
-    max_files: int = 160,
-    max_excerpt_bytes_per_file: int = 2_000,
+    max_files: int = PILOT_MAX_FILES,
+    max_excerpt_bytes_per_file: int = PILOT_MAX_EXCERPT_BYTES_PER_FILE,
     max_total_excerpt_bytes: int = PILOT_MAX_TOTAL_EXCERPT_BYTES,
     max_hash_bytes_per_file: int = 4_000_000,
 ) -> dict[str, Any]:
