@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import socket
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -210,7 +209,7 @@ class OllamaModelAdapter:
         except HTTPError as exc:
             code = "OLLAMA_MODEL_NOT_FOUND" if exc.code == 404 else "OLLAMA_HTTP_ERROR"
             return _terminal(self._identity, call, code)
-        except (TimeoutError, socket.timeout):
+        except TimeoutError:
             return _terminal(self._identity, call, "OLLAMA_TIMEOUT")
         except (URLError, OSError):
             return _terminal(self._identity, call, "OLLAMA_UNAVAILABLE")

@@ -13,7 +13,6 @@ from causal_cell.repository_pilot import (
     ACTION_DRAFT_PROFILE,
     PILOT_CAPABILITY_ID,
     PILOT_MAX_TOTAL_EXCERPT_BYTES,
-    PILOT_ORGANISM_ID,
     PILOT_SUBJECT,
     PILOT_TARGET,
     build_repository_runner,
