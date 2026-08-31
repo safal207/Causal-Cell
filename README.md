@@ -7,7 +7,7 @@ output as a proposal, evaluates trusted authority and policy before dispatch,
 and preserves authorization, observation, continuity, and evidence as separate
 records.
 
-Status: `v0.2.0` alpha reference implementation; Organism protocol `v0.1`.
+Status: `v0.2.1` alpha reference implementation; Organism protocol `v0.1`.
 
 ```mermaid
 flowchart TD
